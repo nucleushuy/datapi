@@ -60,6 +60,40 @@ npm run check         # Lint, format, and type check
 ./pi-test.sh         # Run pi from sources (can be run from any directory)
 ```
 
+## Local data workbench
+
+Requires Node.js **22.19.0 or newer** and the root workspace dependencies. Start from the repository root:
+
+```bash
+npm install --ignore-scripts
+npm run dev:workbench
+```
+
+Open `http://127.0.0.1:4310`. Optional launch settings:
+
+```bash
+npm run dev:workbench -- --port 4311 --data-dir ./local-workbench-data
+```
+
+The shell has project/dataset navigation, Data/Code/Visualize/Statistics/Models workspace tabs, and Assistant/Suggestions/Activity inspector tabs. Drag the separators or focus them and use Left/Right (Home/End for limits). Below 1100px the inspector moves below the workspace; below 700px all panels stack. Individual tables and tab bars scroll without widening the page.
+
+Use the Commands button or Ctrl+K (Command+K on macOS) for navigation, theme, and layout actions. Tab groups support Left/Right and Home/End. Escape closes the command palette and restores focus. Panel widths, selected tabs, and theme persist in browser storage for the same server address. Reset layout restores the default shell arrangement.
+
+The existing local CSV workflow remains available: create a project, import UTF-8 CSV up to 100 MB, inspect paginated original values, open column profiles in Statistics, and inspect source provenance. Project/dataset files default to `~/.datapi/workbench`. No dataset content is sent to an LLM.
+
+Code, Visualize, Models, and assistant views are explicitly **not connected in this stage**. They do not execute code, create charts, train models, or call an AI provider. The CSV backend remains provisional; this shell stage does not implement the later ingestion architecture.
+
+Focused checks (from the repository root; no full build or provider tests):
+
+```bash
+node --test packages/workbench/test/browser/shell.test.ts
+node --test packages/workbench/test/profiler.test.ts packages/workbench/test/storage.test.ts packages/workbench/test/server.test.ts
+npm run typecheck --workspace=@earendil-works/pi-workbench
+npm run check
+```
+
+Component tests cover shell tabs, resizing, palette interaction, persistence, invalid preferences, and recovery. Real-browser verification is also required for responsive layout, pointer interaction, focus, and the existing CSV flow. `npm run check` does not run the tests.
+
 ## Building standalone binaries from release source
 
 GitHub releases include a versioned source archive covered by the release's `SHA256SUMS` file. Extract it and run the same build script used for the official standalone binaries:
