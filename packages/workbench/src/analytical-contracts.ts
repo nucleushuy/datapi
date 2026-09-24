@@ -1,3 +1,4 @@
+import type { ChartResult, ChartSpec } from "./chart-contracts.ts";
 import type { ColumnProfile, DatasetColumn, DatasetFormat, Preview } from "./contracts.ts";
 import type { DatasetProfile, ProfileInput } from "./profile-contracts.ts";
 
@@ -12,7 +13,8 @@ export type AnalyticalRequest =
 			expectedByteSize: number;
 	  }
 	| { kind: "preview"; artifactPath: string; tempPath: string; offset: number; limit: number; total: number }
-	| { kind: "profile"; artifactPath: string; tempPath: string; input: ProfileInput };
+	| { kind: "profile"; artifactPath: string; tempPath: string; input: ProfileInput }
+	| { kind: "chart"; artifactPath: string; tempPath: string; input: ProfileInput; spec: ChartSpec };
 
 export type AnalyticalResult =
 	| {
@@ -25,7 +27,8 @@ export type AnalyticalResult =
 			engineVersion: string;
 	  }
 	| { kind: "preview"; preview: Preview }
-	| { kind: "profile"; profile: DatasetProfile };
+	| { kind: "profile"; profile: DatasetProfile }
+	| { kind: "chart"; chart: ChartResult };
 
 // Curated protocol errors only. Native parser errors can contain source paths and cell contents.
 export const ANALYTICAL_ERROR_MESSAGES = [
@@ -51,6 +54,8 @@ export const ANALYTICAL_ERROR_MESSAGES = [
 	"Analytical preview is invalid or its artifact is unavailable.",
 	"Profile artifact does not match its recorded SHA-256 hash or schema.",
 	"Profile exceeds the supported report size.",
+	"Chart specification is invalid for this dataset version.",
+	"Chart result exceeds the supported display size; reduce fields or categories.",
 ] as const;
 
 export type AnalyticalErrorMessage = (typeof ANALYTICAL_ERROR_MESSAGES)[number];

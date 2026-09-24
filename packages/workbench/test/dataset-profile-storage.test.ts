@@ -67,11 +67,7 @@ test(
 	{ timeout: 120_000 },
 	async (context) => {
 		const { state, projectId } = await fixture(context);
-		const source =
-			"id,value,category\n" +
-			Array.from({ length: 5000 }, (_, index) => `${index % 20},${index % 10},private-category-${index % 2}\n`).join(
-				"",
-			);
+		const source = `id,value,category\n${Array.from({ length: 5000 }, (_, index) => `${index % 20},${index % 10},private-category-${index % 2}\n`).join("")}`;
 		const original = await imported(state.store, projectId, source);
 		const beforeArtifact = await readFile(artifact(state.root, original));
 		assert.equal(await state.store.getProfile(projectId, original.id), null);
@@ -337,7 +333,7 @@ test(
 			const path = `/api/projects/${owner.id}/datasets/${importedJob.datasetId}/profile`;
 			for (const method of ["GET", "POST"]) {
 				assert.equal((await fetch(`${app.url}${path}`, { method })).status, 403);
-				const response = await fetch(
+				const response: Response = await fetch(
 					`${app.url}/api/projects/${other.id}/datasets/${importedJob.datasetId}/profile`,
 					{ method, headers },
 				);

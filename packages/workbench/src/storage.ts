@@ -4,6 +4,8 @@ import { link, lstat, mkdir, open, readdir, readFile, rename, rm, unlink } from 
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { AnalyticalRequest, AnalyticalResult } from "./analytical-contracts.ts";
 import { runAnalytical } from "./analytical-process.ts";
+import type { ChartRecord, ChartResult, ChartSpec } from "./chart-contracts.ts";
+import { parseChartSpec } from "./chart-spec.ts";
 import type { Dataset, DatasetFormat, ImportJob, Preview, Project, ProjectSettings } from "./contracts.ts";
 import {
 	MAX_PREVIEW_ROWS,
@@ -99,6 +101,8 @@ export class WorkbenchStore {
 	#metadata?: MetadataStore;
 	#previewTask?: Promise<Preview>;
 	#previewController?: AbortController;
+	#chartTask?: Promise<ChartResult>;
+	#chartController?: AbortController;
 	#profileRead?: {
 		projectId: string;
 		datasetId: string;
@@ -392,6 +396,184 @@ export class WorkbenchStore {
 		return dataset;
 	}
 
+	async listCharts(projectId: string, datasetId: string): Promise<ChartRecord[]> {
+		await this.getDataset(projectId, datasetId);
+		this.#assertReady();
+		return this.#metadata!.charts(projectId, datasetId);
+	}
+
+	#chartName(value: unknown): string {
+		if (
+			typeof value !== "string" ||
+			!value.trim() ||
+			value.trim().length > 120 ||
+			/[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/.test(value)
+		)
+			throw new WorkbenchError(400, "Chart name must contain 1 to 120 characters without control characters.");
+		return value.trim();
+	}
+
+	#chartSpec(dataset: Dataset, value: unknown, currentOnly: boolean): ChartSpec {
+		if (typeof value !== "object" || value === null || !("datasetVersionId" in value))
+			throw new WorkbenchError(400, "A structured chart specification is required.");
+		const versionId = value.datasetVersionId;
+		if (
+			typeof versionId !== "string" ||
+			!dataset.versions.some((version) => version.id === versionId && version.kind === "derived") ||
+			(currentOnly && versionId !== dataset.currentVersionId)
+		)
+			throw new WorkbenchError(
+				409,
+				"Chart belongs to a different dataset version. Select the current version before previewing.",
+			);
+		try {
+			return parseChartSpec(value, dataset.schema, versionId);
+		} catch {
+			throw new WorkbenchError(400, "Chart specification is invalid for this dataset.");
+		}
+	}
+
+	async createChart(projectId: string, datasetId: string, name: unknown, value: unknown): Promise<ChartRecord> {
+		const dataset = await this.getDataset(projectId, datasetId);
+		this.#assertReady();
+		const now = new Date().toISOString();
+		const chart: ChartRecord = {
+			id: randomUUID(),
+			projectId,
+			datasetId,
+			name: this.#chartName(name),
+			createdAt: now,
+			updatedAt: now,
+			spec: this.#chartSpec(dataset, value, false),
+		};
+		this.#metadata!.transaction(() => {
+			if (this.#metadata!.chartCount(projectId, datasetId) >= 100)
+				throw new WorkbenchError(
+					409,
+					"This dataset already has 100 saved charts. Delete a chart before saving another.",
+				);
+			this.#metadata!.putChart(chart);
+		});
+		return chart;
+	}
+
+	async updateChart(
+		projectId: string,
+		datasetId: string,
+		id: string,
+		name: unknown,
+		value: unknown,
+	): Promise<ChartRecord> {
+		const dataset = await this.getDataset(projectId, datasetId);
+		this.#assertReady();
+		validateId(id);
+		const previous = this.#metadata!.chart(projectId, datasetId, id);
+		if (!previous) throw new WorkbenchError(404, "Requested chart was not found in this dataset.");
+		const chart: ChartRecord = {
+			...previous,
+			name: this.#chartName(name),
+			spec: this.#chartSpec(dataset, value, false),
+			updatedAt: new Date().toISOString(),
+		};
+		this.#metadata!.putChart(chart);
+		return chart;
+	}
+
+	async deleteChart(projectId: string, datasetId: string, id: string): Promise<{ deleted: true }> {
+		await this.getDataset(projectId, datasetId);
+		this.#assertReady();
+		validateId(id);
+		if (!this.#metadata!.chart(projectId, datasetId, id))
+			throw new WorkbenchError(404, "Requested chart was not found in this dataset.");
+		this.#metadata!.deleteChart(projectId, datasetId, id);
+		return { deleted: true };
+	}
+
+	async chartPreview(
+		projectId: string,
+		datasetId: string,
+		value: unknown,
+		signal?: AbortSignal,
+	): Promise<ChartResult> {
+		const dataset = await this.getDataset(projectId, datasetId);
+		this.#assertReady();
+		const spec = this.#chartSpec(dataset, value, true);
+		if (this.#active || this.#previewTask || this.#profileRead || this.#chartTask)
+			throw new WorkbenchError(409, "Another analytical operation is active.");
+		const controller = new AbortController();
+		const abort = () => controller.abort(new WorkbenchError(409, "Chart preview was cancelled."));
+		const check = () => {
+			if (controller.signal.aborted)
+				throw controller.signal.reason instanceof WorkbenchError
+					? controller.signal.reason
+					: new WorkbenchError(409, "Chart preview was cancelled.");
+		};
+		signal?.addEventListener("abort", abort, { once: true });
+		if (signal?.aborted) abort();
+		const timer = setTimeout(
+			() => controller.abort(new WorkbenchError(408, "Chart preview exceeded the five-minute limit.")),
+			PROCESSING_TIMEOUT_MS,
+		);
+		timer.unref();
+		const directory = join(this.#root, "staging", randomUUID());
+		this.#chartController = controller;
+		const task = (async (): Promise<ChartResult> => {
+			try {
+				check();
+				const input = await this.#profileInput(dataset, controller.signal);
+				check();
+				if (!this.#cachedProfile(dataset, input))
+					throw new WorkbenchError(409, "Compute a current dataset profile before previewing charts.");
+				await mkdir(directory);
+				check();
+				const result = await runAnalytical(
+					{
+						kind: "chart",
+						artifactPath: this.#profileArtifact(dataset),
+						tempPath: directory,
+						input,
+						spec,
+					},
+					undefined,
+					controller.signal,
+				).catch((error: Error) => {
+					throw new WorkbenchError(400, error.message);
+				});
+				check();
+				if (result.kind !== "chart") throw new WorkbenchError(500, "Unexpected chart worker response.");
+				const current = await this.#profileInput(dataset, controller.signal);
+				check();
+				if (
+					current.datasetVersionHash !== input.datasetVersionHash ||
+					current.storageBytes !== input.storageBytes ||
+					this.#metadata!.dataset(projectId, datasetId)?.currentVersionId !== input.datasetVersionId
+				)
+					throw new WorkbenchError(409, "Dataset changed while preparing the chart; no chart was returned.");
+				return result.chart;
+			} catch (error) {
+				check();
+				throw error instanceof WorkbenchError
+					? error
+					: new WorkbenchError(500, "Chart preview failed. Check disk access and available space.");
+			} finally {
+				await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }).catch(() => {
+					throw new WorkbenchError(500, "Chart temporary files could not be removed. Check disk permissions.");
+				});
+			}
+		})();
+		this.#chartTask = task;
+		try {
+			const result = await task;
+			check();
+			return result;
+		} finally {
+			clearTimeout(timer);
+			signal?.removeEventListener("abort", abort);
+			this.#chartTask = undefined;
+			this.#chartController = undefined;
+		}
+	}
+
 	async preview(projectId: string, datasetId: string, offset: number, limit = PAGE_SIZE): Promise<Preview> {
 		this.#assertReady();
 		if (!Number.isSafeInteger(offset) || offset < 0)
@@ -400,7 +582,7 @@ export class WorkbenchStore {
 			throw new WorkbenchError(400, "Preview limit must be between 1 and 500 rows.");
 		const dataset = await this.getDataset(projectId, datasetId);
 		this.#assertReady();
-		if (this.#active || this.#previewTask || this.#profileRead)
+		if (this.#active || this.#previewTask || this.#profileRead || this.#chartTask)
 			throw new WorkbenchError(409, "An analytical operation is active. Retry the preview when it finishes.");
 		if (offset >= dataset.rowCount) return { offset, limit, total: dataset.rowCount, rows: [] };
 		const version = dataset.versions.find((item) => item.id === dataset.currentVersionId && item.kind === "derived");
@@ -496,7 +678,7 @@ export class WorkbenchStore {
 		format: DatasetFormat = dataset?.format ?? "csv",
 	): ActiveJob {
 		this.#assertReady();
-		if (this.#active || this.#previewTask || this.#profileRead)
+		if (this.#active || this.#previewTask || this.#profileRead || this.#chartTask)
 			throw new WorkbenchError(409, "Another analytical operation is active.");
 		const job: ImportJob = {
 			id: randomUUID(),
@@ -614,6 +796,8 @@ export class WorkbenchStore {
 				return this.#profileRead.task;
 			throw new WorkbenchError(409, "Another profile read is active.");
 		}
+		if (this.#chartTask)
+			throw new WorkbenchError(409, "A chart preview is active. Retry the profile read when it finishes.");
 		const controller = new AbortController();
 		const task = (async () => {
 			const input = await this.#profileInput(dataset, controller.signal);
@@ -1024,6 +1208,8 @@ export class WorkbenchStore {
 
 	async #close(): Promise<void> {
 		await this.#initializing?.catch(() => {});
+		this.#chartController?.abort();
+		await this.#chartTask?.catch(() => {});
 		const active = this.#active;
 		if (active) {
 			this.#stop(active, new WorkbenchError(409, "Operation was cancelled during shutdown."), true);

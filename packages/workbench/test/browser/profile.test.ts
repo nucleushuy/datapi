@@ -576,3 +576,77 @@ test("a cached report for another dataset version is rejected instead of display
 	assert.equal(element("statistics-rich").hidden, true);
 	assert.equal(element<HTMLButtonElement>("run-profile").disabled, false);
 });
+
+test("initial preview finishes before saved profile lookup takes analytical admission", async (t) => {
+	const pendingProfile = deferredResponse();
+	let profileReadActive = false;
+	let rejectedPreviews = 0;
+	const { element, requests } = await setup(t, {
+		respond(path) {
+			if (path === profileUrl) {
+				profileReadActive = true;
+				return pendingProfile.promise.finally(() => {
+					profileReadActive = false;
+				});
+			}
+			if (path.includes("/preview?") && profileReadActive) {
+				rejectedPreviews++;
+				return Response.json({ error: "Another analytical operation is active" }, { status: 409 });
+			}
+		},
+	});
+	assert.equal(rejectedPreviews, 0);
+	assert.equal(element("preview-scroll").hidden, false);
+	assert.equal(element("preview-body").querySelector("td")?.textContent, "1");
+	assert.equal(element("retry-preview").hidden, true);
+	assert.ok(
+		requests.findIndex(({ path }) => path.includes("/preview?")) <
+			requests.findIndex(({ path }) => path === profileUrl),
+	);
+	assert.equal(element<HTMLButtonElement>("run-profile").disabled, true);
+	pendingProfile.resolve(Response.json({ profile }));
+	await waitFor(() => !element<HTMLButtonElement>("run-profile").disabled);
+	assert.equal(element("statistics-rich").hidden, false);
+});
+
+test("dataset switches block Run profile until initial preview settles and ignore stale preview continuations", async (t) => {
+	const pendingPreview = deferredResponse();
+	const secondPath = `/api/projects/${project.id}/datasets/${secondDataset.id}`;
+	const { element, document, requests } = await setup(t, {
+		respond(path) {
+			if (path.startsWith(`${secondPath}/preview?`)) return pendingPreview.promise;
+		},
+	});
+	await waitFor(() => !element<HTMLButtonElement>("run-profile").disabled);
+	document.querySelector<HTMLButtonElement>(`[data-dataset-id="${secondDataset.id}"]`)?.click();
+	await waitFor(
+		() =>
+			element("dataset-heading").textContent === secondDataset.name &&
+			element("preview-panel").getAttribute("aria-busy") === "true",
+	);
+	assert.equal(element<HTMLButtonElement>("run-profile").disabled, true);
+	element("run-profile").click();
+	assert.equal(
+		requests.some(({ init }) => init.method === "POST"),
+		false,
+	);
+	assert.equal(
+		requests.some(({ path }) => path === `${secondPath}/profile`),
+		false,
+	);
+	document.querySelector<HTMLButtonElement>(`[data-dataset-id="${dataset.id}"]`)?.click();
+	await waitFor(
+		() =>
+			element("dataset-heading").textContent === dataset.name && !element<HTMLButtonElement>("run-profile").disabled,
+	);
+	const profileReads = requests.filter(({ path }) => path === profileUrl).length;
+	pendingPreview.resolve(Response.json({ offset: 0, limit: 100, total: 100, rows: [["stale", "row"]] }));
+	await pause(10);
+	assert.equal(requests.filter(({ path }) => path === profileUrl).length, profileReads);
+	assert.equal(
+		requests.some(({ path }) => path === `${secondPath}/profile`),
+		false,
+	);
+	assert.equal(element("preview-body").querySelector("td")?.textContent, "1");
+	assert.equal(element("dataset-heading").textContent, dataset.name);
+});

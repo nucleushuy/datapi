@@ -85,7 +85,17 @@ Application metadata lives in SQLite under `~/.datapi/workbench`; original files
 
 Ingestion limits: 512 columns, 1 MiB serialized record, 256 MiB decoded output, 16 MiB Parquet footer, and 64 MiB declared uncompressed row group. Fixed analytical workers use a Windows JobObject with a 1 GiB committed-memory cap, a five-minute deadline, and descendant cleanup; DuckDB has a 256 MiB buffer limit and 512 MiB spill limit. Derived database files have a separate 512 MiB limit. These limits can reject valid highly compressed datasets. Encrypted Parquet, INT96, nanosecond UTC timestamps and nanosecond times are explicitly unsupported. This resource boundary is **not** a filesystem/network sandbox and never accepts user code or arbitrary SQL.
 
-Code, Visualize, Models, and assistant views are explicitly **not connected in this stage**. They do not execute code, create charts, train models, or call an AI provider. Richer profiling and data-quality reports are a later stage.
+Choose **Run profile** for a cancellable, deterministic report; no LLM is involved. Search/select columns beside the original preview, or use **Statistics → Data Quality** for severity-filtered evidence and proposed actions. Profiles cache by project, dataset version, actual analytical artifact SHA-256, and profiler version. Recomputing ingestion statistics still creates a separate derived version and invalidates that profile identity.
+
+Profiling inspects all rows when they fit, otherwise a deterministic systematic sample: at most 4,096 rows, 200,000 cells and 16 MiB serialized sample data. Ordering can bias the sample; sampled counts are not population estimates. Numeric arithmetic is explicitly approximate, including full scans; unsafe integers are excluded rather than rounded. Examples/top-value labels are redacted. Correlation covers the first 24 eligible numeric columns; reports retain at most 128 findings and disclose omitted work. Confidence values are heuristic scores, not probability guarantees. Profiles are capped at 4 MiB and use the existing worker deadline/memory limits.
+
+After **Run profile**, open **Visualize**, choose a recommendation or chart type, set the available X/Y/color/size/facet fields, aggregation, sorting and filters, then choose **Render chart**. Supported charts are histogram, box plot, bar, line, scatter, heatmap, correlation and missingness; model-result is an explicitly untrained placeholder. Compare data with a chart (select marks to highlight matching visible source rows), two independent charts, or two filtered variants with shared encodings. Comparison layout/specifications persist in browser storage; results require rendering again. Save, load, update, duplicate, rename or confirm deletion of chart configurations, up to 100 per dataset. Configurations are bound to the dataset version and cannot be rendered against a different current version. These actions never change original data or create a transformed dataset.
+
+Chart limits are separate from profiling limits: a deterministic sample of at most 4,096 rows, 200,000 cells and 16 MiB, projecting only referenced fields (including filter and matrix fields); at most 4,096 marks, 1,000 scatter points, 30 categories, 10 color groups and four facets. Correlation uses the first 12 numeric fields; missingness shows SQL NULLs in the first 24 fields, not empty strings. The linked table contains at most 100 filtered sample rows and 512 KiB of original values from referenced fields; some selected rows may be outside this table. Results are capped at 4 MiB. Comparison panes render sequentially through the existing bounded analytical worker; **Cancel render** stops unfinished work while retaining completed pane results.
+
+Filters and aggregates operate on the bounded sample, not on the whole dataset unless every row fits; sampled counts are not population estimates. The studio discloses sampling, omitted marks/rows, missing values and approximate arithmetic. Export PNG, SVG or HTML, or inspect/export the JSON specification with its frozen result and Python plotting code. Python reproduces frozen bounded aggregates/observations, not a source-data transformation, and is never executed by the application. Exports can contain selected bounded observations, category labels and other dataset values; review them before sharing.
+
+Code, Models and assistant execution remain **not connected in this stage**: no application Python execution, model training or AI-provider calls. Prompt 5 visualization is complete; Prompt 6 and every later stage require separate approval.
 
 Focused checks (from the repository root; no full build or provider tests):
 
@@ -93,11 +103,14 @@ Focused checks (from the repository root; no full build or provider tests):
 node --test packages/workbench/test/browser/shell.test.ts packages/workbench/test/browser/ingestion.test.ts
 node --test packages/workbench/test/profiler.test.ts packages/workbench/test/storage.test.ts packages/workbench/test/server.test.ts packages/workbench/test/legacy-migration.test.ts
 node --test packages/workbench/test/format-validation.test.ts packages/workbench/test/analytical.test.ts packages/workbench/test/analytical-process.test.ts
+node --test packages/workbench/test/dataset-profiler.test.ts packages/workbench/test/profile-worker.test.ts packages/workbench/test/dataset-profile-storage.test.ts packages/workbench/test/browser/profile.test.ts
+node --test packages/workbench/test/chart-spec.test.ts packages/workbench/test/chart-engine.test.ts packages/workbench/test/chart-worker.test.ts packages/workbench/test/chart-storage.test.ts
+node --test packages/workbench/test/browser/chart-renderer.test.ts packages/workbench/test/browser/chart-studio.test.ts
 npm run typecheck --workspace=@earendil-works/pi-workbench
 npm run check
 ```
 
-Tests cover shell interaction, ingestion controls, CSV/Parquet values, pagination, cancellation/retry, migration, project isolation, and real Windows worker resource/lifecycle boundaries. Real-browser verification is also required for responsive layout and the complete import workflow. `npm run check` does not run tests.
+Tests cover shell interaction, ingestion controls, CSV/Parquet values, pagination, cancellation/retry, migration, project isolation, real Windows worker resource/lifecycle boundaries, deterministic charts, version-bound configuration persistence, comparisons and export safety. The Prompt 5 checkpoint passed all 164 focused tests across these 19 files and `npm run check`, plus actual browser chart/comparison/export and responsive-layout smoke checks. `npm run check` does not run tests. See the [implementation plan](docs/data-science-workbench-plan.md#prompt-5-current-checkpoint) for verification details.
 
 ## Building standalone binaries from release source
 

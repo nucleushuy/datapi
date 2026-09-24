@@ -82,7 +82,7 @@ export async function startWorkbench(options: WorkbenchOptions): Promise<Workben
 		response.setHeader("X-Frame-Options", "DENY");
 		response.setHeader(
 			"Content-Security-Policy",
-			"default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+			"default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' blob:; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
 		);
 		if (
 			request.headers.host !== authority ||
@@ -216,6 +216,53 @@ export async function startWorkbench(options: WorkbenchOptions): Promise<Workben
 					const limitText = url.searchParams.get("limit") ?? String(PAGE_SIZE);
 					if (!/^\d+$/.test(limitText)) throw new WorkbenchError(400, "Preview limit must be a positive integer.");
 					json(response, 200, await store.preview(projectId, datasetId, Number(offsetText), Number(limitText)));
+					return;
+				}
+				if (datasetId && parts[5] === "charts" && (parts.length === 6 || parts.length === 7)) {
+					const chartId = parts[6];
+					if (!chartId && method === "GET") {
+						json(response, 200, await store.listCharts(projectId, datasetId));
+						return;
+					}
+					if ((!chartId && method === "POST") || (chartId && method === "PUT")) {
+						await store.getDataset(projectId, datasetId);
+						const input = await readMetadata(request);
+						if (Object.keys(input).length !== 2 || !Object.hasOwn(input, "name") || !Object.hasOwn(input, "spec"))
+							throw new WorkbenchError(400, "Provide only a chart name and specification.");
+						if (chartId)
+							json(
+								response,
+								200,
+								await store.updateChart(projectId, datasetId, chartId, input.name, input.spec),
+							);
+						else json(response, 201, await store.createChart(projectId, datasetId, input.name, input.spec));
+						return;
+					}
+					if (chartId && method === "DELETE") {
+						json(response, 200, await store.deleteChart(projectId, datasetId, chartId));
+						return;
+					}
+				}
+				if (datasetId && parts.length === 6 && parts[5] === "chart-preview" && method === "POST") {
+					const controller = new AbortController();
+					const abort = () => controller.abort();
+					const close = () => {
+						if (!response.writableFinished) controller.abort();
+					};
+					request.once("aborted", abort);
+					response.once("close", close);
+					if (request.destroyed || response.destroyed) controller.abort();
+					try {
+						await store.getDataset(projectId, datasetId);
+						const input = await readMetadata(request);
+						if (Object.keys(input).length !== 1 || !Object.hasOwn(input, "spec"))
+							throw new WorkbenchError(400, "Provide only a chart specification.");
+						const chart = await store.chartPreview(projectId, datasetId, input.spec, controller.signal);
+						if (!response.destroyed) json(response, 200, chart);
+					} finally {
+						request.off("aborted", abort);
+						response.off("close", close);
+					}
 					return;
 				}
 				if (datasetId && parts.length === 6 && parts[5] === "profile") {

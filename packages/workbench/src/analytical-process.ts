@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ANALYTICAL_ERROR_MESSAGES, type AnalyticalRequest, type AnalyticalResult } from "./analytical-contracts.ts";
+import { parseChartSpec } from "./chart-spec.ts";
+import { isChartResult } from "./chart-validation.ts";
 import {
 	type ColumnProfile,
 	type DatasetColumn,
@@ -76,6 +78,8 @@ function column(value: unknown, index: number): value is DatasetColumn {
 
 function resultMatches(value: unknown, request: AnalyticalRequest): value is AnalyticalResult {
 	if (!record(value) || value.kind !== request.kind) return false;
+	if (request.kind === "chart")
+		return keys(value, ["kind", "chart"]) && isChartResult(value.chart, request.input, request.spec);
 	if (request.kind === "profile")
 		return keys(value, ["kind", "profile"]) && isDatasetProfile(value.profile, request.input);
 	if (request.kind === "ingest") {
@@ -129,6 +133,15 @@ function requestValid(request: AnalyticalRequest): boolean {
 	const paths = [request.artifactPath, request.tempPath];
 	if (request.kind === "ingest") paths.push(request.sourcePath);
 	if (!paths.every((path) => typeof path === "string" && isAbsolute(path) && !path.includes("\0"))) return false;
+	if (request.kind === "chart") {
+		if (!isProfileInput(request.input)) return false;
+		try {
+			parseChartSpec(request.spec, request.input.schema, request.input.datasetVersionId);
+			return true;
+		} catch {
+			return false;
+		}
+	}
 	if (request.kind === "profile") return isProfileInput(request.input);
 	return request.kind === "ingest"
 		? (request.format === "csv" || request.format === "parquet") &&

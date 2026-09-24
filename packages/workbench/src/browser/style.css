@@ -68,6 +68,10 @@
 	--skeleton-duration: 1200ms;
 	--duration: 140ms;
 	--ease-out: cubic-bezier(0.25, 1, 0.5, 1);
+	--chart-field-width: 14rem;
+	--chart-control-min: 10rem;
+	--chart-pane-min: 22rem;
+	--chart-canvas-height: 18rem;
 }
 
 :root[data-theme="light"] {
@@ -354,6 +358,64 @@ kbd { font-family: var(--font-mono); font-size: inherit; }
 .severity-error { color: var(--error); }
 .issue-evidence { padding-left: var(--space-4); }
 .quality-issue > p { font-size: var(--text-sm); }
+
+.chart-studio { container-type: inline-size; min-width: 0; }
+.chart-studio > .profile-toolbar { padding-block: var(--space-3); }
+.chart-gate { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-4); padding: var(--space-5); border-left: var(--space-1) solid var(--accent); background: var(--container-bg); }
+.chart-gate p { flex: 1 1 var(--measure-short); color: var(--muted); }
+.chart-workspace, .chart-main { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-5); min-width: 0; }
+.chart-field-browser { min-width: 0; padding: var(--space-4); background: var(--container-bg); border: var(--border-width) solid var(--border); border-radius: var(--radius); }
+.chart-field-browser > .chart-control + .chart-control { margin-top: var(--space-3); }
+.chart-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--chart-field-width)), 1fr)); max-height: var(--chart-canvas-height); margin-bottom: 0; }
+.chart-fields .column-option { min-height: 100%; }
+.chart-comparison-controls, .chart-control-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--chart-control-min)), 1fr)); gap: var(--space-3); }
+.chart-comparison-controls > p { grid-column: 1 / -1; font-size: var(--text-sm); }
+.chart-control { min-width: 0; }
+.chart-control > label { margin-bottom: var(--space-2); font-size: var(--text-sm); color: var(--muted); }
+.chart-control input[type="checkbox"] { width: var(--space-5); height: var(--space-5); min-height: var(--space-5); accent-color: var(--accent); }
+.chart-editor { min-width: 0; margin: 0; padding: var(--space-4); border: var(--border-width) solid var(--border); border-radius: var(--radius); }
+.chart-editor legend { padding-inline: var(--space-2); color: var(--text-strong); font-weight: 600; }
+.chart-disclosure { min-width: 0; border-block-start: var(--border-width) solid var(--border-muted); }
+.chart-disclosure > summary { padding-block: var(--space-3); color: var(--accent); font-size: var(--text-sm); }
+.chart-disclosure h4 { margin-block: var(--space-4) var(--space-2); font-size: var(--text-sm); }
+.chart-recommendations { display: grid; gap: var(--space-3); list-style: none; margin: 0; padding: 0 0 var(--space-4); }
+.chart-recommendations li { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-3); }
+.chart-recommendations li span { flex: 1 1 var(--detail-label-width); font-size: var(--text-sm); }
+.chart-recommendations .button { flex: 0 0 auto; }
+.chart-filters { display: grid; gap: var(--space-3); margin-top: var(--space-3); }
+.chart-filter { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--chart-control-min)), 1fr)); align-items: end; gap: var(--space-3); padding-top: var(--space-3); border-top: var(--border-width) solid var(--border-muted); }
+.chart-filter > .button { white-space: normal; }
+.chart-saved > .chart-control { margin-bottom: var(--space-3); }
+.chart-delete-confirmation { display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: center; margin-top: var(--space-3); padding: var(--space-4); border: var(--border-width) solid var(--warning); background: var(--warning-bg); }
+.chart-delete-confirmation > p { flex: 1 1 100%; color: var(--warning); overflow-wrap: anywhere; }
+.chart-canvases { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-5); min-width: 0; }
+.chart-canvases:not([data-mode="single"]) { grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--chart-pane-min)), 1fr)); }
+.chart-pane, .chart-data-panel { min-width: 0; padding-top: var(--space-4); border-top: var(--focus-width) solid var(--border); }
+.chart-pane[data-active="true"] { border-top-color: var(--accent); }
+.chart-pane > h3, .chart-data-panel > h3 { margin-bottom: var(--space-3); }
+.chart-canvas { min-width: 0; overflow: hidden; }
+.chart-canvas-empty { display: grid; align-content: center; min-height: var(--chart-canvas-height); padding: var(--space-6); background: var(--container-bg); color: var(--muted); border: var(--border-width) dashed var(--border); }
+.chart-metadata { grid-template-columns: minmax(0, 1fr); }
+.chart-metadata dt { border-bottom: 0; padding-bottom: 0; }
+.chart-metadata dd { padding-top: var(--space-1); }
+.chart-warnings { padding-left: var(--space-4); color: var(--warning); font-size: var(--text-sm); overflow-wrap: anywhere; }
+.chart-warnings:empty { display: none; }
+.chart-warnings li + li { margin-top: var(--space-2); }
+.chart-code { max-width: 100%; max-height: var(--table-height); margin-block: var(--space-3); padding: var(--space-3); overflow: auto; border: var(--border-width) solid var(--border); border-radius: var(--radius); background: var(--container-bg); color: var(--text); font-family: var(--font-mono); font-size: var(--text-xs); tab-size: 2; }
+.chart-exports { margin-top: var(--space-3); }
+.chart-data-panel > .button { margin-bottom: var(--space-3); }
+.chart-data-panel tr[data-highlighted="true"] { background: var(--selected-bg); }
+.chart-data-panel tr[data-highlighted="true"] .row-number { color: var(--accent); box-shadow: inset var(--focus-width) 0 var(--accent); }
+.chart-figure { margin: 0; min-width: 0; max-width: 100%; }
+.workbench-chart { display: block; width: 100%; height: auto; }
+.chart-figure figcaption { margin-top: var(--space-2); color: var(--muted); font-size: var(--text-sm); overflow-wrap: anywhere; }
+.workbench-chart .chart-mark[role="button"] { cursor: pointer; outline: none; }
+.workbench-chart .chart-mark:focus .chart-glyph, .workbench-chart .chart-mark[aria-pressed="true"] .chart-glyph { stroke: var(--focus); stroke-width: var(--space-1); }
+.workbench-chart .chart-mark:hover .chart-glyph { stroke: var(--text-strong); stroke-width: var(--focus-width); }
+@container (min-width: 64rem) {
+	.chart-workspace { grid-template-columns: var(--chart-field-width) minmax(0, 1fr); align-items: start; }
+	.chart-fields { grid-template-columns: minmax(0, 1fr); max-height: var(--table-height); }
+}
 
 @media (max-width: 799px) {
 	.preview-profile-layout { grid-template-columns: minmax(0, 1fr); }

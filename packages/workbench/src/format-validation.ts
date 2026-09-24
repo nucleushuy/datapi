@@ -3,6 +3,7 @@ import { createReadStream } from "node:fs";
 import { lstat, open } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import type { AnalyticalErrorMessage, AnalyticalRequest } from "./analytical-contracts.ts";
+import { parseChartSpec } from "./chart-spec.ts";
 import {
 	MAX_DECODED_BYTES,
 	MAX_PARQUET_FOOTER_BYTES,
@@ -49,6 +50,20 @@ export function parseAnalyticalRequest(value: unknown): AnalyticalRequest {
 	if (!value || typeof value !== "object") fail("Analytical worker request is invalid.");
 	const request = value as Record<string, unknown>;
 	if (!localPath(request.artifactPath) || !localPath(request.tempPath)) fail("Analytical worker request is invalid.");
+	if (request.kind === "chart") {
+		if (!isProfileInput(request.input)) fail("Analytical worker request is invalid.");
+		try {
+			return {
+				kind: "chart",
+				artifactPath: resolve(request.artifactPath),
+				tempPath: resolve(request.tempPath),
+				input: request.input,
+				spec: parseChartSpec(request.spec, request.input.schema, request.input.datasetVersionId),
+			};
+		} catch {
+			fail("Chart specification is invalid for this dataset version.");
+		}
+	}
 	if (request.kind === "profile") {
 		if (!isProfileInput(request.input)) fail("Analytical worker request is invalid.");
 		return {

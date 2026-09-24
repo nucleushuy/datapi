@@ -15,6 +15,7 @@ import {
 	PROFILER_VERSION,
 	type ProfileResponse,
 } from "../profile-contracts.ts";
+import { initializeChartStudio } from "./chart-studio.ts";
 import { initializeShell } from "./shell.ts";
 
 const shell = initializeShell(document, window);
@@ -192,6 +193,7 @@ let previewVersion = 0;
 let listAbort: AbortController | null = null;
 let datasetAbort: AbortController | null = null;
 let previewAbort: AbortController | null = null;
+let previewLoading = false;
 let profileAbort: AbortController | null = null;
 let profileRequestVersion = 0;
 let richProfile: DatasetProfile | null = null;
@@ -207,6 +209,19 @@ let requestedPageIndex = 0;
 let currentPreview: Preview | null = null;
 let operation: Operation | null = null;
 let pendingRetry: Operation | null = null;
+let chartBusy = false;
+const chartStudio = initializeChartStudio(element("chart-studio"), {
+	api,
+	message,
+	onBusy(busy) {
+		chartBusy = busy;
+		updateControls();
+	},
+	onProfile() {
+		ui.runProfile.scrollIntoView?.({ block: "center" });
+		ui.runProfile.focus();
+	},
+});
 const countFormatter = new Intl.NumberFormat();
 const dateFormatter = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "medium" });
 const storagePrefix = "datapi.workbench.";
@@ -294,13 +309,23 @@ function updateControls(): void {
 	ui.projectPreviewLimit.disabled = !ready || creatingProject;
 	ui.createProject.disabled = !ready || creatingProject;
 	ui.createProject.textContent = creatingProject ? "Creating…" : "Create project";
-	ui.importButton.disabled = !ready || projectId === null || operationActive();
-	ui.emptyAction.disabled = !ready || (projectId !== null && (operationActive() || listingDatasets));
-	ui.recompute.disabled = !ready || dataset === null || operationActive();
-	ui.runProfile.disabled = !ready || dataset === null || operationActive() || profileLoading;
-	ui.retryProfile.disabled = !ready || operationActive() || profileLoading;
-	ui.previewLimit.disabled = !ready || dataset === null;
-	ui.retryImport.disabled = !ready || operationActive();
+	ui.importButton.disabled = !ready || projectId === null || operationActive() || chartBusy;
+	ui.emptyAction.disabled = !ready || chartBusy || (projectId !== null && (operationActive() || listingDatasets));
+	ui.recompute.disabled = !ready || dataset === null || operationActive() || chartBusy;
+	ui.runProfile.disabled =
+		!ready || dataset === null || operationActive() || previewLoading || profileLoading || chartBusy;
+	ui.retryProfile.disabled = !ready || operationActive() || previewLoading || profileLoading || chartBusy;
+	ui.previewLimit.disabled = !ready || dataset === null || chartBusy;
+	ui.retryImport.disabled = !ready || operationActive() || chartBusy;
+	ui.retryPreview.disabled = chartBusy;
+	ui.previousPage.disabled = chartBusy || previewLoading || currentPreview === null || pageIndex === 0;
+	ui.nextPage.disabled =
+		chartBusy ||
+		previewLoading ||
+		currentPreview === null ||
+		nextOffset >= currentPreview.total ||
+		currentPreview.rows.length === 0;
+	chartStudio.setBlocked(!ready || operationActive() || previewLoading || profileLoading);
 }
 
 function previewRowLimit(preferred: number): number {
@@ -391,10 +416,13 @@ function renderEmpty(): void {
 }
 
 function resetDataset(): void {
+	chartStudio.clear();
 	datasetVersion++;
 	previewVersion++;
 	datasetAbort?.abort();
 	previewAbort?.abort();
+	previewLoading = false;
+	ui.previewPanel.setAttribute("aria-busy", "false");
 	profileRequestVersion++;
 	profileAbort?.abort();
 	richProfile = null;
@@ -522,8 +550,9 @@ async function selectDataset(id: string, preserveView = false): Promise<void> {
 		renderDataset(loaded);
 		showView(view);
 		announce(`${loaded.name}, ${count(loaded.rowCount)} rows and ${count(loaded.columnCount)} columns.`);
-		void loadRichProfile();
 		await loadPreview(0);
+		if (request !== datasetVersion || projectId !== owner || datasetId !== id) return;
+		void loadRichProfile();
 	} catch (error) {
 		if (request !== datasetVersion || isAborted(error)) return;
 		ui.datasetLoading.hidden = true;
@@ -687,6 +716,7 @@ function renderRichProfileStatus(): void {
 
 function renderRichProfile(): void {
 	if (!dataset) return;
+	if (projectId) chartStudio.update({ projectId, dataset, profile: richProfile });
 	ui.richProfile.hidden = false;
 	renderRichProfileStatus();
 	const overview: [string, string, string][] = [
@@ -1034,7 +1064,7 @@ async function loadRichProfile(): Promise<void> {
 }
 
 async function runRichProfile(): Promise<void> {
-	if (!ready || !dataset || !projectId || operationActive() || profileLoading) return;
+	if (!ready || !dataset || !projectId || operationActive() || previewLoading || profileLoading || chartBusy) return;
 	const source = dataset;
 	const owner = projectId;
 	profileError = "";
@@ -1054,12 +1084,15 @@ async function runRichProfile(): Promise<void> {
 
 async function loadPreview(offset: number, index = pageIndex): Promise<void> {
 	if (!projectId || !datasetId || !dataset) return;
+	if (chartBusy) return;
 	const owner = projectId;
 	const id = datasetId;
 	const request = ++previewVersion;
 	previewAbort?.abort();
 	const controller = new AbortController();
 	previewAbort = controller;
+	previewLoading = true;
+	updateControls();
 	previewOffset = offset;
 	requestedPageIndex = index;
 	ui.previewPanel.setAttribute("aria-busy", "true");
@@ -1139,7 +1172,11 @@ async function loadPreview(offset: number, index = pageIndex): Promise<void> {
 		if (currentPreview === null) ui.pageSummary.textContent = "Preview unavailable";
 		announce("Could not load the preview. Use Retry preview.");
 	} finally {
-		if (request === previewVersion) ui.previewPanel.setAttribute("aria-busy", "false");
+		if (request === previewVersion) {
+			previewLoading = false;
+			ui.previewPanel.setAttribute("aria-busy", "false");
+			updateControls();
+		}
 	}
 }
 
@@ -1401,7 +1438,7 @@ async function cancelOperation(value: Operation): Promise<void> {
 }
 
 async function importFile(file: File, previous?: Operation): Promise<void> {
-	if (!ready || operationActive()) return;
+	if (!ready || operationActive() || chartBusy) return;
 	const priorJob = previous?.job;
 	if (
 		previous &&
@@ -1486,7 +1523,7 @@ async function importFile(file: File, previous?: Operation): Promise<void> {
 }
 
 async function recompute(): Promise<void> {
-	if (!ready || !dataset || !projectId || operationActive()) return;
+	if (!ready || !dataset || !projectId || operationActive() || chartBusy) return;
 	const source = dataset;
 	const owner = projectId;
 	const value = newOperation("reprofile", source.name, owner, source.byteSize, source.id);

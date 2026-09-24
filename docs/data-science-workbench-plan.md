@@ -1,6 +1,6 @@
 # Data-science workbench implementation plan
 
-Status: architecture and Prompts 2–3 approved. Three-panel shell and CSV/Parquet ingestion implemented; current verification is recorded below. Prompt 4 and later stages remain unimplemented and require their own approval.
+Status: architecture and Prompts 2–5 approved. Three-panel shell, CSV/Parquet ingestion, deterministic rich profiling, visualization and comparisons implemented and verified. Stop at Prompt 5; Prompt 6 and every later stage require separate approval.
 
 ## 1. Scope and current checkpoint
 
@@ -10,9 +10,9 @@ Confirmed choices: local single-user operation, Windows x64 first, CSV and Parqu
 
 Prompt 0's operating rules are already present in `AGENTS.md`. No duplicate instructions are necessary.
 
-### Existing uncommitted work is provisional
+### Current uncommitted implementation
 
-The original CSV-only slice has been reconciled into `packages/workbench`: native-DOM shell, SQLite application metadata, project-scoped durable jobs, streamed CSV/Parquet imports, immutable originals, separate versioned DuckDB artifacts, and bounded previews. The existing elementary profiles remain; complete quality profiles, charts, and assistant integration are not implemented.
+The original CSV-only slice has been reconciled into `packages/workbench`: native-DOM shell, SQLite application metadata, project-scoped durable jobs, streamed CSV/Parquet imports, immutable originals, separate versioned DuckDB artifacts, and bounded previews. Prompt 4 adds versioned deterministic profiles and evidence-based quality reports; Prompt 5 adds deterministic charts, saved configurations, comparisons and bounded exports. Assistant integration and application Python execution remain unimplemented.
 
 Changes remain uncommitted. Legacy JSON projects migrate under the existing storage lock with source-hash verification; originals and legacy metadata are retained. The former JSONL preview engine is no longer used.
 
@@ -25,9 +25,9 @@ Historical verification before the stage reset:
 - The compatible Node installation produced an engine warning for the existing Gondolin example, which requires Node `>=23.6.0`; that example was not run.
 - No browser workflow, near-100 MB UI import, or visual verification was completed. No application service was started. No commit or branch change was made.
 
-This historical checkpoint was not a green baseline. Subsequent work resolved its prerequisites; the current Prompt 3 results below supersede it. Model APIs were not weakened to bypass missing generated data.
+This historical checkpoint was not a green baseline. Subsequent Prompt 3–5 results below supersede it. Model APIs were not weakened to bypass missing generated data.
 
-### Prompt 3 verification checkpoint
+### Prompt 3 verification checkpoint (history)
 
 - Real browser: project description/default rows, CSV/Parquet import and schema, exact large integer/decimal text, null/empty distinction, paging, malformed input preserving the current dataset, cancellation, fresh-file retry, same-project duplicate indication, and persistence across server restart.
 - Near-limit browser import: 98,688,899-byte CSV, 100,000 rows. The 50-second observation window saw server private memory at most 72,056,832 bytes and working set at most 67,878,912 bytes; this is an observed workload, not a universal bound.
@@ -36,6 +36,24 @@ This historical checkpoint was not a green baseline. Subsequent work resolved it
 - All 67 focused workbench tests passed across the documented test files; `npm run check` passed formatting/lint, pinned dependencies, import/lock checks, root/workbench types, and browser bundling. Node still emits its experimental SQLite/MockTimers notices during tests; no suppression was added.
 - Parquet group metadata exposes null native types for LIST/STRUCT nodes; bounded schema binding now obtains complete column types without reading rows. Regression fixtures include lists and exact numeric values.
 - No AI, generated-code execution, or Prompt 4 expansion. See the root README for current commands and supported limits.
+
+### Prompt 4 checkpoint (history)
+
+- Explicit cancellable rich-profile jobs, separate from ingestion recomputation; cache keys include project/dataset/version, actual artifact SHA-256, and profiler version. Cache reads and publication validate artifact identity; original datasets and lineage are unchanged.
+- Overview, searchable beside-preview column inspector, complete numeric statistics and semantic candidates, severity-filtered quality evidence, redacted examples and proposed actions. All sampled quantities and numeric approximations are labeled.
+- At most 4,096 sampled rows, 200,000 cells, 16 MiB sample bytes, 24 numeric correlation fields, 128 findings and 4 MiB reports. Deterministic systematic sampling may miss periodic or rare observations; limitations are displayed, not hidden.
+- Wide profiling orders bounded row identifiers before projecting columns, avoiding DuckDB's wide Top-N memory expansion without raising its 256 MiB limit.
+- Browser exercised full and sampled reports, column search/selection, severity filtering, cancellation/rerun, cache reuse, restart persistence, dataset switching and 390px layout. Initial preview now finishes before saved-profile lookup to avoid competing for analytical admission.
+- Focused workbench tests passed after updating the intentional control-request size boundary and adding two preview/profile admission regressions; final `npm run check` passed. The fixed-worker 512-column fixture passes without relaxing memory limits. Validation commands and remaining limitations are documented in the root README.
+
+### Prompt 5 current checkpoint
+
+- Profile first, then use Visualize field controls and explicit rendering for histogram, box plot, bar, line, scatter, heatmap, correlation and missingness. Model-result remains an untrained placeholder. Data/chart linked marks, independent chart/chart panes and shared-encoding filtered variants preserve original data. Configuration CRUD is capped at 100 per dataset and bound to its current version; comparison specifications persist across reloads.
+- Sampling, referenced-field projection, mark/category/facet limits, linked-table and result caps are documented in the [root README](../README.md#local-data-workbench). Filters and aggregates describe only the bounded sample, not population estimates. Panes run sequentially through the existing cancellable analytical worker. JSON includes the specification and frozen result; exported Python plots those frozen aggregates/observations rather than transforming source data. Exports may disclose bounded dataset observations and labels.
+- All 164 focused workbench tests passed across the 19 test files listed in the README, including six chart test files; `npm run check` passed. SVG, HTML and JSON export safety is covered by real-DOM tests.
+- Actual browser smoke covered an 80-row full result and a 2,500-of-5,000-row sampled result; all eight chart types and the untrained placeholder; scatter color/size/facet controls, data/chart linked marks, chart/chart, filtered variants and reload persistence; saved-configuration create/load/update/duplicate/rename and confirmed deletion; and 390px mobile layout without page overflow.
+- Browser downloads completed for PNG (293,051 bytes), SVG (36,100 bytes), standalone HTML (92,353 bytes) and JSON (47,615 bytes). Standalone HTML rendered with no scripts or remote resources. All eight exported Python chart scripts exited successfully with matplotlib 3.10.3; the Agg backend emitted expected noninteractive `show` warnings. This was external export verification, not application Python execution.
+- No AI-provider calls, model training, arbitrary transformations or application Python execution were enabled. Prompt 5 is complete; stop before Prompt 6 pending approval.
 
 ## 2. Repository map
 
@@ -52,7 +70,7 @@ Paths in this section exist. Proposed paths are labelled separately below.
 | `packages/coding-agent/src/client` | Public `@earendil-works/pi-coding-agent/client` exports `RemoteSession` and transcript projection. Useful if the experimental remote stack is deliberately adopted; not needed for initial ingestion. |
 | `packages/session-backends/sqlite-node` | Real `node:sqlite` backend for agent-core session repositories, migrations, writer leases and optional FTS search. Not an application project/dataset database and not a drop-in SDK `SessionManager`. |
 | `packages/telemetry`, `packages/evals` | Existing telemetry contracts and evaluation workspace. Do not build a second agent telemetry system or run paid-provider evaluations for workbench tests. |
-| `packages/workbench` | Provisional private local CSV application described above; no accepted architecture implied by its existence. |
+| `packages/workbench` | Private local workbench through Prompt 5: shell, CSV/Parquet ingestion, profiles, deterministic charts and comparisons; later integrations remain gated. |
 
 Existing browser artifacts include `packages/coding-agent/src/core/export-html` and `scripts/tool-stats.ts`. A static transcript export or tool-usage chart report is not a live workbench or reusable data-charting engine.
 
@@ -192,7 +210,7 @@ Expected Prompt 1 change: this document only. Future root wiring stays limited t
 
 ## 7. Milestones and stage gates
 
-Prompts 1–3 have been approved and implemented. Read each later prompt immediately before its stage; do not advance automatically.
+Prompts 1–5 have been approved and implemented. Read each later prompt immediately before its separately approved stage; do not advance automatically.
 
 | Stage | Bounded deliverable and exit gate |
 | --- | --- |
@@ -201,7 +219,7 @@ Prompts 1–3 have been approved and implemented. Read each later prompt immedia
 | 2 | Three resizable panels, requested center/right tabs, palette, themes, persistent layout and accessibility. Clearly labelled shell-only view models where needed. Browser proof and component behavior tests; no ingestion expansion. |
 | 3 | Project/dataset entities, CSV and Parquet streaming ingestion, immutable sources, hashes, bounded analytical previews, progress/cancel/retry, safe failures and project scoping. Reconcile provisional storage rather than declare it sufficient. |
 | 4 | Deterministic versioned profiles and quality evidence, richer statistics/semantic candidates, exact-vs-approximate labels, cache keys and cancellation. Provisional min/max/counts are not the complete stage. |
-| 5 | Deterministic visualization studio and side-by-side comparison; serializable chart specifications, safe aggregation and export. Select chart library here. |
+| 5 | Completed deterministic visualization studio and side-by-side comparison; version-bound chart specifications, bounded aggregation, native SVG rendering and exports. Verification recorded above. |
 | 6 | Pi read-only assistant and evidence-based proposals through the approved boundary, explicit context-sharing preview and validation. No arbitrary transformation execution. |
 | 7 | Validated reproducible transformations, impact preview, approval, immutable versions and undo/redo. |
 | 8 | Code workspace with independently verified OS-isolated execution; no host fallback. |
@@ -235,7 +253,7 @@ Source anchors: `packages/coding-agent/docs/{sdk,rpc,containerization,windows}.m
 ## 9. Testing and proof strategy
 
 - Prompt 1: source-backed audit and this document; no installs, scaffolding, feature edits or additional validation runs after the stage reset.
-- Shell: component behavior for splitter persistence, tabs, command palette, focus and keyboard navigation; actual browser screenshots/interaction at desktop and tablet widths, error/loading/empty states and no page overflow. Select a DOM/browser test dependency explicitly at Prompt 2 if needed; no such frontend test stack is currently established.
+- Shell: component behavior for splitter persistence, tabs, command palette, focus and keyboard navigation; actual browser screenshots/interaction at desktop and tablet widths, error/loading/empty states and no page overflow. Reuse the established workbench DOM test harness.
 - Ingestion: fixture-based CSV/Parquet correctness, adversarial filenames/content, strict limits, bounded output, cancellation during upload/parse/publish, retry, restart and no cross-project lookup. Browser-drive the complete create/import/inspect/restart flow; include a near-limit file and observe memory/disk behavior.
 - Profiles/charts: known numerical fixtures, exact/approximate flags, deterministic cache invalidation, operation/spec round-trips, provenance and bounded exports. Test returned behavior, not source text or implementation details.
 - Assistant: reuse existing SDK/faux-provider conventions, no real paid tokens. Test safe context construction, malicious names/cells, structured-output rejection, unsupported claims, session isolation and cancellation. Existing remote-session/projector tests are reusable if that stack is selected.
@@ -250,14 +268,14 @@ Commands below are verified from manifests/scripts, not all executed. Run from t
 | --- | --- |
 | `npm install --ignore-scripts` | Hydrate workspace dependencies without lifecycle scripts. Executed before Prompt 1. |
 | `npm install --package-lock-only --ignore-scripts` | Refresh lockfile after reviewed dependency metadata changes. Executed before Prompt 1. |
-| `npm run check` | Biome **writes formatting/fixes**, then dependency/import/lock checks, root tsgo, provisional workbench typecheck and browser bundling. Historical failure described above; not a test suite. |
+| `npm run check` | Biome **writes formatting/fixes**, then dependency/import/lock checks, root tsgo, workbench typecheck and browser bundling. Passed at Prompt 5; not a test suite. |
 | `npm run hydrate:model-data` | Root delegates to AI strict data-only catalog hydration. Network access required; writes ignored provider JSON, not a reason to edit `models.generated.ts`. Source-supported repair for missing data; not run during Prompt 1. |
 | `npm run check:model-data` | Validates hydrated model data. Does not replace narrow product tests. |
 | `npm run check:browser-smoke` | esbuild browser compatibility/tree-shaking check, **not** a UI browser test. |
-| `npm run dev:workbench` | Provisional launcher: `node packages/workbench/src/cli.ts`; defaults to loopback port 4310 and `~/.datapi/workbench`. Not browser-verified. |
-| `npm run dev:workbench -- --port 4310 --data-dir <directory>` | Provisional launcher with explicit data root. Placeholder must be replaced by a real path. |
-| `npm run typecheck --workspace=@earendil-works/pi-workbench` | Provisional scoped tsgo check, includes DOM types. Not reached by the failed root check. |
-| `node --test test/profiler.test.ts test/storage.test.ts test/server.test.ts` from `packages/workbench` | Executed with the compatible Node binary: 19 passed. |
+| `npm run dev:workbench` | Local launcher: `node packages/workbench/src/cli.ts`; defaults to loopback port 4310 and `~/.datapi/workbench`. Browser-verified through Prompt 5. |
+| `npm run dev:workbench -- --port 4310 --data-dir <directory>` | Launcher with explicit data root. Placeholder must be replaced by a real path. |
+| `npm run typecheck --workspace=@earendil-works/pi-workbench` | Scoped tsgo check, includes DOM types; passed as part of Prompt 5 `npm run check`. |
+| Focused `node --test` commands in the root README | Current 19-file workbench coverage, including six chart files: 164 tests passed at Prompt 5. The original three-file, 19-test run is historical. |
 | `node ../../node_modules/vitest/dist/cli.js --run test/client/remote-session.test.ts` from `packages/coding-agent` | Existing focused public-client contract test; command/path verified, not run in this audit. |
 | `node --test test/specific.test.ts` from `packages/tui` | Repository pattern; replace `specific.test.ts` with a verified target. |
 | `./test.sh` | Root Bash wrapper that isolates environment/config and invokes non-provider-dependent tests. Requires Bash on Windows; arguments are not a file filter. Not run. |
@@ -266,9 +284,9 @@ Commands below are verified from manifests/scripts, not all executed. Run from t
 | `npm run dev --workspace=@earendil-works/pi-server` | TypeScript watch only; does **not** launch an application server. |
 | `npm run build` / `npm run build:offline` | Existing ordered package builds. Offline requires hydrated data; neither is authorized or run by this documentation stage. |
 
-There is no generic root `dev` web-server command beyond the provisional workbench launcher. Full SDK package-root runtime imports normally resolve built `dist` exports; do not claim direct SDK execution is ready merely because source aliases typecheck. Establish the supported source/build workflow when assistant integration is approved.
+There is no generic root `dev` web-server command beyond the workbench launcher. Full SDK package-root runtime imports normally resolve built `dist` exports; do not claim direct SDK execution is ready merely because source aliases typecheck. Establish the supported source/build workflow when assistant integration is approved.
 
-Official analytical-client evidence: [DuckDB Node Neo overview](https://duckdb.org/docs/current/clients/node_neo/overview.html) documents the high-level `@duckdb/node-api` package and Windows x64 support. Dependency version, lifecycle behavior and runtime limits still need stage-specific verification.
+Official analytical-client evidence: [DuckDB Node Neo overview](https://duckdb.org/docs/current/clients/node_neo/overview.html) documents the high-level `@duckdb/node-api` package and Windows x64 support. Local ingestion and fixed analytical-worker verification are recorded in the stage checkpoints above; future execution boundaries still require their own proof.
 
 ## 11. Approval gate
 
@@ -282,4 +300,4 @@ Approved architecture choices (recorded before Prompt 2):
 
 Preserve uncommitted implementation and source data. Do not automatically create branches or commit existing work; the worktree also contains the user's prompt file. Agree on checkpoint/branch action before doing either.
 
-Stop after Prompt 3 acceptance. Next recommended task, only after approval: read Prompt 4 in full and present its exact file scope and acceptance criteria before changing code.
+Stop after completed Prompt 5 acceptance. Next recommended task, only after approval: read Prompt 6 in full and present its exact file scope and acceptance criteria before changing code. Prompts 6 and later remain unimplemented and individually approval-gated.

@@ -6,6 +6,15 @@ import type { DuckDBAppender, DuckDBConnection, DuckDBResult, DuckDBValue } from
 import { DuckDBInstance } from "@duckdb/node-api";
 import { CsvError, parse } from "csv-parse";
 import type { AnalyticalMessage, AnalyticalRequest, AnalyticalResult } from "./analytical-contracts.ts";
+import {
+	CHART_RESULT_BYTES,
+	CHART_SAMPLE_BYTES,
+	CHART_SAMPLE_CELLS,
+	CHART_SAMPLE_ROWS,
+	type ChartSample,
+} from "./chart-contracts.ts";
+import { computeChart } from "./chart-engine.ts";
+import { chartColumns } from "./chart-validation.ts";
 import type { ColumnProfile, DatasetColumn } from "./contracts.ts";
 import {
 	MAX_COLUMNS,
@@ -577,6 +586,68 @@ async function preview(request: PreviewRequest): Promise<AnalyticalResult> {
 	}
 }
 
+async function chartDataset(request: Extract<AnalyticalRequest, { kind: "chart" }>): Promise<AnalyticalResult> {
+	const { input } = request;
+	const info = await lstat(request.artifactPath);
+	if (!info.isFile() || info.isSymbolicLink() || info.size !== input.storageBytes || info.size > MAX_TEMP_BYTES)
+		fail("Profile artifact does not match its recorded SHA-256 hash or schema.");
+	const hash = createHash("sha256");
+	let hashedBytes = 0;
+	for await (const chunk of createReadStream(request.artifactPath, { highWaterMark: 64 * 1024 })) {
+		hashedBytes += chunk.length;
+		if (hashedBytes > MAX_TEMP_BYTES) fail("Profile artifact does not match its recorded SHA-256 hash or schema.");
+		hash.update(chunk);
+	}
+	if (hashedBytes !== input.storageBytes || hash.digest("hex") !== input.datasetVersionHash)
+		fail("Profile artifact does not match its recorded SHA-256 hash or schema.");
+	const { instance, connection, reader } = await database(request.artifactPath, request, true);
+	try {
+		const shape = await connection.run("SELECT * FROM data LIMIT 0");
+		if (
+			shape.columnCount !== input.schema.length + 1 ||
+			shape.columnName(0) !== "row_index" ||
+			input.schema.some((_, index) => shape.columnName(index + 1) !== `c${index}`)
+		)
+			fail("Profile artifact does not match its recorded SHA-256 hash or schema.");
+		const population = await connection.run("SELECT count(*) FROM data");
+		const chunk = await population.fetchChunk();
+		if (!chunk || count(chunk.getRowValues(0)[0]) !== input.rowCount)
+			fail("Profile artifact does not match its recorded SHA-256 hash or schema.");
+		const columns = chartColumns(request.spec, input.schema);
+		const capacity = Math.min(CHART_SAMPLE_ROWS, Math.floor(CHART_SAMPLE_CELLS / columns.length));
+		const stride = Math.max(1, Math.ceil(input.rowCount / capacity));
+		// Limit identifiers before projecting wide values; avoids DuckDB wide Top-N allocation.
+		const result = await connection.stream(
+			`SELECT row_index, ${columns.map((column) => `c${column.index}`).join(", ")} FROM data WHERE row_index IN (SELECT row_index FROM data WHERE row_index % $1 = 0 ORDER BY row_index LIMIT $2) ORDER BY row_index`,
+			[BigInt(stride), capacity],
+		);
+		const sample: ChartSample = { columns, rows: [], populationRows: input.rowCount, stride, byteLimited: false };
+		let bytes = 0;
+		const progress = progressReporter();
+		await send({ type: "progress", bytesProcessed: 0, rowCount: 0 });
+		for await (const values of rows(result)) {
+			const row = { rowId: count(values[0]), values: textRow(values.slice(1)) };
+			const rowBytes = Buffer.byteLength(JSON.stringify(row)) + 1;
+			if (rowBytes > MAX_RECORD_BYTES + 128) fail("Dataset record exceeds the 1 MiB serialized size limit.");
+			if (bytes + rowBytes > CHART_SAMPLE_BYTES) {
+				sample.byteLimited = true;
+				break;
+			}
+			bytes += rowBytes;
+			sample.rows.push(row);
+			await progress(0, sample.rows.length);
+		}
+		const chart = computeChart(request.spec, sample, input.datasetVersionHash, new Date().toISOString());
+		if (Buffer.byteLength(JSON.stringify(chart)) > CHART_RESULT_BYTES)
+			fail("Chart result exceeds the supported display size; reduce fields or categories.");
+		return { kind: "chart", chart };
+	} finally {
+		reader.closeSync();
+		connection.closeSync();
+		instance.closeSync();
+	}
+}
+
 async function profileDataset(request: Extract<AnalyticalRequest, { kind: "profile" }>): Promise<AnalyticalResult> {
 	const input = request.input;
 	const info = await lstat(request.artifactPath);
@@ -608,7 +679,7 @@ async function profileDataset(request: Extract<AnalyticalRequest, { kind: "profi
 		const capacity = Math.min(PROFILE_SAMPLE_ROWS, Math.floor(PROFILE_SAMPLE_CELLS / names.length));
 		const stride = Math.max(1, Math.ceil(input.rowCount / capacity));
 		const result = await connection.stream(
-			`SELECT ${names.join(", ")} FROM data WHERE row_index % $1 = 0 ORDER BY row_index LIMIT $2`,
+			`SELECT ${names.join(", ")} FROM data WHERE row_index IN (SELECT row_index FROM data WHERE row_index % $1 = 0 ORDER BY row_index LIMIT $2) ORDER BY row_index`,
 			[BigInt(stride), capacity],
 		);
 		const sample: (string | null)[][] = [];
@@ -662,7 +733,9 @@ async function main(): Promise<void> {
 			? await ingest(request)
 			: request.kind === "profile"
 				? await profileDataset(request)
-				: await preview(request);
+				: request.kind === "chart"
+					? await chartDataset(request)
+					: await preview(request);
 	await send({ type: "result", result });
 }
 

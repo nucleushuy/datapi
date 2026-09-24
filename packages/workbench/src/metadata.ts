@@ -1,4 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
+import type { ChartRecord } from "./chart-contracts.ts";
 import type { Dataset, ImportJob, Project } from "./contracts.ts";
 import type { DatasetProfile } from "./profile-contracts.ts";
 
@@ -15,7 +16,7 @@ export class MetadataStore {
 		this.#db = new DatabaseSync(path, { allowExtension: false });
 		this.#db.exec("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;");
 		const version = this.#db.prepare("PRAGMA user_version").get()?.user_version;
-		if (version !== 0 && version !== 1 && version !== 2) {
+		if (version !== 0 && version !== 1 && version !== 2 && version !== 3) {
 			this.#db.close();
 			throw new Error("Unsupported application metadata version.");
 		}
@@ -26,6 +27,7 @@ export class MetadataStore {
 				sha256 TEXT NOT NULL, format TEXT NOT NULL, created_at TEXT NOT NULL, metadata TEXT NOT NULL
 			);
 			CREATE INDEX IF NOT EXISTS datasets_project_hash ON datasets(project_id,sha256,format);
+			CREATE UNIQUE INDEX IF NOT EXISTS datasets_project_id ON datasets(project_id,id);
 			CREATE TABLE IF NOT EXISTS jobs (
 				id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
 				state TEXT NOT NULL, created_at TEXT NOT NULL, metadata TEXT NOT NULL
@@ -38,8 +40,14 @@ export class MetadataStore {
 				profiler_version INTEGER NOT NULL, metadata TEXT NOT NULL,
 				PRIMARY KEY(project_id,dataset_id,dataset_version_id,artifact_sha256,profiler_version)
 			);
+			CREATE TABLE IF NOT EXISTS charts (
+				project_id TEXT NOT NULL, dataset_id TEXT NOT NULL, id TEXT NOT NULL,
+				dataset_version_id TEXT NOT NULL, created_at TEXT NOT NULL, metadata TEXT NOT NULL,
+				PRIMARY KEY(project_id,dataset_id,id),
+				FOREIGN KEY(project_id,dataset_id) REFERENCES datasets(project_id,id)
+			);
 			CREATE TABLE IF NOT EXISTS migrations (name TEXT PRIMARY KEY);
-			PRAGMA user_version=2;
+			PRAGMA user_version=3;
 		`);
 	}
 	get migrated(): boolean {
@@ -123,6 +131,43 @@ export class MetadataStore {
 				profile.profilerVersion,
 				JSON.stringify(profile),
 			);
+	}
+	charts(projectId: string, datasetId: string): ChartRecord[] {
+		return this.#db
+			.prepare("SELECT metadata FROM charts WHERE project_id=? AND dataset_id=? ORDER BY created_at,id")
+			.all(projectId, datasetId)
+			.map((row) => decode<ChartRecord>(row)!);
+	}
+	chart(projectId: string, datasetId: string, id: string): ChartRecord | undefined {
+		return decode<ChartRecord>(
+			this.#db
+				.prepare("SELECT metadata FROM charts WHERE project_id=? AND dataset_id=? AND id=?")
+				.get(projectId, datasetId, id),
+		);
+	}
+	chartCount(projectId: string, datasetId: string): number {
+		return Number(
+			this.#db
+				.prepare("SELECT COUNT(*) AS count FROM charts WHERE project_id=? AND dataset_id=?")
+				.get(projectId, datasetId)?.count,
+		);
+	}
+	putChart(chart: ChartRecord): void {
+		this.#db
+			.prepare(
+				"INSERT INTO charts(project_id,dataset_id,id,dataset_version_id,created_at,metadata) VALUES (?,?,?,?,?,?) ON CONFLICT(project_id,dataset_id,id) DO UPDATE SET dataset_version_id=excluded.dataset_version_id,metadata=excluded.metadata",
+			)
+			.run(
+				chart.projectId,
+				chart.datasetId,
+				chart.id,
+				chart.spec.datasetVersionId,
+				chart.createdAt,
+				JSON.stringify(chart),
+			);
+	}
+	deleteChart(projectId: string, datasetId: string, id: string): void {
+		this.#db.prepare("DELETE FROM charts WHERE project_id=? AND dataset_id=? AND id=?").run(projectId, datasetId, id);
 	}
 	job(projectId: string, id: string): ImportJob | undefined {
 		return decode<ImportJob>(

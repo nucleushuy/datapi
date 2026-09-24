@@ -9,6 +9,7 @@ import { describe, it } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { runAnalytical } from "../src/analytical-process.ts";
+import { PROFILE_REQUEST_BYTES } from "../src/profile-contracts.ts";
 
 const windows = process.platform === "win32" && process.arch === "x64";
 const helperPath = fileURLToPath(new URL("./analytical-helper.ps1", import.meta.url));
@@ -77,7 +78,7 @@ async function launch(
 }> {
 	const root = await mkdtemp(join(tmpdir(), "pi worker ' 雪 "));
 	const request = join(root, "request ' 雪.json");
-	await writeFile(request, options.oversized ? " ".repeat(16 * 1024 + 1) : JSON.stringify({ mode }));
+	await writeFile(request, options.oversized ? " ".repeat(PROFILE_REQUEST_BYTES + 1) : JSON.stringify({ mode }));
 	const child = options.parent
 		? spawn(process.execPath, [fixturePath, "--parent", request], { windowsHide: true, shell: false, stdio: "pipe" })
 		: spawn(
