@@ -1,5 +1,6 @@
 import type { ChartFilter, ChartResult, ChartSpec } from "./chart-contracts.ts";
 import type { DatasetColumn } from "./contracts.ts";
+import type { TransformSpec } from "./transform-contracts.ts";
 
 export const ASSISTANT_CONTEXT_BYTES = 96 * 1024;
 export const ASSISTANT_OUTPUT_BYTES = 128 * 1024;
@@ -25,6 +26,12 @@ export interface AssistantModels {
 	models: AssistantModel[];
 	guidance: string;
 }
+export interface AssistantAttachment {
+	name: string;
+	mediaType: string;
+	content: string;
+	byteLength: number;
+}
 export interface AssistantSelection {
 	datasetVersionId: string;
 	selectedColumns: number[];
@@ -32,6 +39,7 @@ export interface AssistantSelection {
 	request: string;
 	provider: string;
 	modelId: string;
+	attachments: AssistantAttachment[];
 }
 export interface AssistantEvidence {
 	id: string;
@@ -58,6 +66,7 @@ export interface AssistantContext {
 	filters: ChartFilter[];
 	evidence: AssistantEvidence[];
 	artifacts: { id: string; name: string; type: string; datasetVersionId: string }[];
+	attachedFiles: AssistantAttachment[];
 	limitations: string[];
 	rowsIncluded: false;
 }
@@ -86,7 +95,10 @@ export interface AssistantSuggestion {
 	confidence: number;
 	evidenceRefs: string[];
 	affectedColumns: number[];
-	proposedAction: { kind: "chart"; spec: ChartSpec } | { kind: "read-only"; description: string };
+	proposedAction:
+		| { kind: "chart"; spec: ChartSpec }
+		| { kind: "transform"; spec: TransformSpec }
+		| { kind: "read-only"; description: string };
 	generatedCode: string | null;
 	status: (typeof SUGGESTION_STATUSES)[number];
 	basis: "evidence-linked" | "hypothesis";

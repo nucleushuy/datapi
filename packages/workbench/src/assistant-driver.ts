@@ -28,7 +28,7 @@ export const ASSISTANT_CATALOG_BYTES = 2 * 1024 * 1024;
 const RESULT_FRAME_BYTES = 6 * ASSISTANT_OUTPUT_BYTES + 4096;
 const PROGRESS_BYTES = 64 * 1024;
 export const ASSISTANT_GUIDANCE =
-	"Configure a literal provider API key for this workbench server. Keys are held only in memory and cleared on restart; no ambient environment keys, credential files, OAuth, cloud credentials, or custom endpoints are used. Configured means a key was supplied, not that the provider has verified it. Model discovery is offline; only an explicitly approved run sends the displayed system and user messages to the selected provider through the Pi SDK.";
+	"Authorize a provider with its literal API key. Pi stores the credential in the local workbench credential store; the browser never receives it after setup. Model discovery is offline; only an explicitly approved run sends the displayed system and user messages to the selected provider through the Pi SDK.";
 export const ASSISTANT_WORKER_ERRORS = {
 	request: "Assistant request is invalid.",
 	credentials: "Configure an API key for the selected assistant provider.",

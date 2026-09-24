@@ -1,5 +1,5 @@
 export type CenterTab = "data" | "code" | "visualize" | "statistics" | "models";
-export type RightTab = "assistant" | "suggestions" | "activity";
+export type RightTab = "assistant" | "activity";
 type Theme = "dark" | "light";
 
 export interface ShellController {
@@ -46,7 +46,7 @@ export function matchesAppKeybinding(event: KeyboardEvent, binding: AppKeybindin
 
 export const SHELL_STORAGE_KEY = "datapi.workbench.shell.v1";
 const CENTER_TABS: readonly CenterTab[] = ["data", "code", "visualize", "statistics", "models"];
-const RIGHT_TABS: readonly RightTab[] = ["assistant", "suggestions", "activity"];
+const RIGHT_TABS: readonly RightTab[] = ["assistant", "activity"];
 const LEFT_MIN = 180;
 const LEFT_MAX = 400;
 const RIGHT_MIN = 240;
@@ -55,7 +55,7 @@ const CENTER_MIN = 320;
 const SPLITTER_WIDTH = 6;
 
 interface ShellPreferences {
-	version: 1;
+	version: 2;
 	leftWidth: number;
 	rightWidth: number;
 	centerTab: CenterTab;
@@ -64,7 +64,7 @@ interface ShellPreferences {
 }
 
 const DEFAULT_PREFERENCES: Readonly<ShellPreferences> = {
-	version: 1,
+	version: 2,
 	leftWidth: 240,
 	rightWidth: 300,
 	centerTab: "data",
@@ -77,11 +77,11 @@ function clamp(value: number, minimum: number, maximum: number): number {
 }
 
 function restorePreferences(value: unknown): ShellPreferences {
-	if (typeof value !== "object" || value === null || !("version" in value) || value.version !== 1) {
-		return { ...DEFAULT_PREFERENCES };
-	}
+	if (typeof value !== "object" || value === null || !("version" in value)) return { ...DEFAULT_PREFERENCES };
+	const isLegacy = value.version === 1;
+	if (!isLegacy && value.version !== 2) return { ...DEFAULT_PREFERENCES };
 	return {
-		version: 1,
+		version: 2,
 		leftWidth:
 			"leftWidth" in value && typeof value.leftWidth === "number" && Number.isFinite(value.leftWidth)
 				? clamp(value.leftWidth, LEFT_MIN, LEFT_MAX)
@@ -91,7 +91,7 @@ function restorePreferences(value: unknown): ShellPreferences {
 				? clamp(value.rightWidth, RIGHT_MIN, RIGHT_MAX)
 				: DEFAULT_PREFERENCES.rightWidth,
 		centerTab:
-			"centerTab" in value && CENTER_TABS.some((tab) => tab === value.centerTab)
+			!isLegacy && "centerTab" in value && CENTER_TABS.some((tab) => tab === value.centerTab)
 				? (value.centerTab as CenterTab)
 				: DEFAULT_PREFERENCES.centerTab,
 		rightTab:

@@ -13,7 +13,16 @@ import {
 } from "./assistant-contracts.ts";
 import type { ChartRecord, ChartResult, ChartSpec } from "./chart-contracts.ts";
 import { parseChartSpec } from "./chart-spec.ts";
-import type { Dataset, DatasetFormat, ImportJob, Preview, Project, ProjectSettings } from "./contracts.ts";
+import type {
+	Dataset,
+	DatasetFormat,
+	DatasetVersion,
+	DatasetVersionFacts,
+	ImportJob,
+	Preview,
+	Project,
+	ProjectSettings,
+} from "./contracts.ts";
 import {
 	MAX_PREVIEW_ROWS,
 	MAX_TEMP_BYTES,
@@ -23,14 +32,28 @@ import {
 	PROFILE_VERSION,
 	SCHEMA_VERSION,
 } from "./contracts.ts";
-import { MetadataStore } from "./metadata.ts";
+import type { Conversation } from "./conversation-contracts.ts";
+import { MetadataStore, type TransformDraft } from "./metadata.ts";
 import { type DatasetProfile, PROFILER_VERSION, type ProfileInput } from "./profile-contracts.ts";
 import { isDatasetProfile } from "./profile-validation.ts";
+import {
+	TRANSFORM_DRAFT_TTL_MS,
+	TRANSFORM_MAX_VERSIONS,
+	TRANSFORM_RESULT_BYTES,
+	type TransformHistory,
+	type TransformPreview,
+	type TransformRecord,
+	type TransformSpec,
+} from "./transform-contracts.ts";
+import { parseTransformSpec } from "./transform-spec.ts";
 
 const ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\s\S])/;
 const RESERVATION_TIMEOUT_MS = 60_000;
 const UPLOAD_IDLE_TIMEOUT_MS = 30_000;
 const UPLOAD_TIMEOUT_MS = 10 * 60_000;
+const MAX_TRANSFORM_DRAFTS = 4;
+const MAX_TRANSFORM_RECORDS = 100;
+const MAX_TRANSFORM_HISTORY_BYTES = 16 * 1024 * 1024;
 
 export class WorkbenchError extends Error {
 	readonly status: number;
@@ -39,6 +62,16 @@ export class WorkbenchError extends Error {
 		this.name = "WorkbenchError";
 		this.status = status;
 	}
+}
+
+function validateConversationMessage(value: Conversation["messages"][number]): boolean {
+	return (
+		typeof value.id === "string" &&
+		typeof value.text === "string" &&
+		(value.role === "user" || value.role === "assistant") &&
+		(value.state === "complete" || value.state === "cancelled" || value.state === "failed") &&
+		Number.isFinite(Date.parse(value.createdAt))
+	);
 }
 
 interface Deferred<T> {
@@ -73,6 +106,12 @@ interface ActiveJob {
 	idleTimer?: NodeJS.Timeout;
 	deadlineTimer?: NodeJS.Timeout;
 	task: Promise<void>;
+}
+
+interface ActiveTransform {
+	controller: AbortController;
+	done: Deferred<void>;
+	committing: boolean;
 }
 
 function hasCode(error: unknown, code: string): boolean {
@@ -116,6 +155,9 @@ export class WorkbenchStore {
 		task: Promise<DatasetProfile | null>;
 		controller: AbortController;
 	};
+	#transformWork?: ActiveTransform;
+	#transformExpiry?: NodeJS.Timeout;
+	#transformCleanup?: Promise<void>;
 	#active?: ActiveJob;
 	#ready = false;
 	#closing = false;
@@ -145,6 +187,10 @@ export class WorkbenchStore {
 			await this.#recoverArtifacts();
 			this.#metadata.recoverJobs();
 			this.#metadata.recoverAssistantRuns();
+			await mkdir(join(this.#root, "transform-drafts"), { recursive: true });
+			await this.#upgradeVersionFacts();
+			this.#metadata.recoverTransforms();
+			await this.#recoverTransformDrafts();
 			this.#ready = true;
 		} catch (error) {
 			this.#metadata?.close();
@@ -294,9 +340,20 @@ export class WorkbenchStore {
 					await mkdir(join(datasetDirectory, "versions"), { recursive: true });
 					await rename(staging, destination);
 					moved = true;
-					metadata.putDataset(
-						this.#datasetRecord(previous.id, old.name, "csv", result, old.id, sourceId, versionId, old.createdAt),
+					const dataset = this.#datasetRecord(
+						previous.id,
+						old.name,
+						"csv",
+						result,
+						old.id,
+						sourceId,
+						versionId,
+						old.createdAt,
 					);
+					const input = await this.#profileInput(dataset, new AbortController().signal);
+					dataset.versions.find((version) => version.id === versionId)!.facts!.artifactSha256 =
+						input.datasetVersionHash;
+					metadata.putDataset(dataset);
 				} catch {
 					if (moved) await rm(destination, { recursive: true, force: true });
 					throw new WorkbenchError(
@@ -332,6 +389,526 @@ export class WorkbenchStore {
 						await rm(join(versions, version.name), { recursive: true, force: true });
 				}
 			}
+		}
+	}
+
+	async #upgradeVersionFacts(): Promise<void> {
+		for (const project of this.#metadata!.projects()) {
+			for (const dataset of this.#metadata!.datasets(project.id)) {
+				let changed = false;
+				for (const version of dataset.versions) {
+					if (version.kind !== "derived" || version.facts?.artifactSha256) continue;
+					if (version.operation.kind !== "ingest")
+						throw new WorkbenchError(500, "Transformed version facts are missing.");
+					// Before transformations, every historical ingestion used the same verified original.
+					const snapshot = { ...dataset, currentVersionId: version.id };
+					const input = await this.#profileInput(snapshot, new AbortController().signal);
+					version.facts = {
+						rowCount: dataset.rowCount,
+						schema: dataset.schema,
+						columns: dataset.columns,
+						profileVersion: dataset.profileVersion,
+						profiledAt: version.id === dataset.currentVersionId ? dataset.profiledAt : version.createdAt,
+						artifactSha256: input.datasetVersionHash,
+					};
+					changed = true;
+				}
+				if (changed) this.#metadata!.putDataset(dataset);
+			}
+		}
+	}
+
+	#draftDirectory(id: string): string {
+		validateId(id);
+		return join(this.#root, "transform-drafts", id);
+	}
+
+	async #removeDraft(
+		record: TransformRecord,
+		state: "failed" | "cancelled" | "expired",
+		message: string,
+	): Promise<void> {
+		record.state = state;
+		record.completedAt = new Date().toISOString();
+		record.error = message;
+		this.#metadata!.transaction(() => {
+			this.#metadata!.deleteTransformDraft(record.projectId, record.datasetId, record.id);
+			this.#metadata!.putTransform(record);
+		});
+		await rm(this.#draftDirectory(record.id), { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+	}
+
+	async #recoverTransformDrafts(): Promise<void> {
+		const retained = new Set<string>();
+		for (const draft of this.#metadata!.transformDrafts()) {
+			const record = this.#metadata!.transform(draft.projectId, draft.datasetId, draft.id)!;
+			const dataset = this.#metadata!.dataset(draft.projectId, draft.datasetId);
+			const timeline = this.#metadata!.transformTimeline(draft.projectId, draft.datasetId);
+			if (Date.parse(draft.expiresAt) <= Date.now()) {
+				await this.#removeDraft(record, "expired", "Preview expired. Generate a new preview before approving.");
+				continue;
+			}
+			if (
+				!dataset ||
+				!record.result ||
+				dataset.currentVersionId !== record.inputVersionId ||
+				timeline.revision !== draft.revision
+			) {
+				await this.#removeDraft(record, "failed", "Dataset changed before this preview was approved.");
+				continue;
+			}
+			try {
+				const input = await this.#profileInput(dataset, new AbortController().signal);
+				const output = await this.#profileInput(
+					dataset,
+					new AbortController().signal,
+					join(this.#draftDirectory(draft.id), "data.duckdb"),
+				);
+				if (
+					input.datasetVersionHash !== draft.inputHash ||
+					output.datasetVersionHash !== draft.outputHash ||
+					output.storageBytes !== draft.storageBytes
+				)
+					throw new Error("Integrity mismatch.");
+				retained.add(draft.id);
+			} catch {
+				await this.#removeDraft(record, "failed", "Preview artifacts failed their integrity check after restart.");
+			}
+		}
+		for (const entry of await readdir(join(this.#root, "transform-drafts"), { withFileTypes: true })) {
+			if (!retained.has(entry.name))
+				await rm(join(this.#root, "transform-drafts", entry.name), { recursive: true, force: true });
+		}
+		this.#scheduleTransformExpiry();
+	}
+
+	#scheduleTransformExpiry(): void {
+		clearTimeout(this.#transformExpiry);
+		if (this.#closing || !this.#metadata) return;
+		const drafts = this.#metadata.transformDrafts();
+		if (!drafts.length) return;
+		const next = Math.min(...drafts.map((draft) => Date.parse(draft.expiresAt)));
+		this.#transformExpiry = setTimeout(
+			() => {
+				if (this.#transformWork) {
+					this.#scheduleTransformExpiry();
+					return;
+				}
+				void this.#expireTransformDrafts().catch(() => {
+					this.#scheduleTransformExpiry();
+				});
+			},
+			Math.max(1000, next - Date.now()),
+		);
+		this.#transformExpiry.unref();
+	}
+
+	#expireTransformDrafts(): Promise<void> {
+		if (this.#transformCleanup) return this.#transformCleanup;
+		const task = (async () => {
+			for (const draft of this.#metadata!.transformDrafts()) {
+				if (Date.parse(draft.expiresAt) > Date.now()) continue;
+				const record = this.#metadata!.transform(draft.projectId, draft.datasetId, draft.id)!;
+				await this.#removeDraft(record, "expired", "Preview expired. Generate a new preview before approving.");
+			}
+		})();
+		this.#transformCleanup = task;
+		void task
+			.finally(() => {
+				this.#transformCleanup = undefined;
+				this.#scheduleTransformExpiry();
+			})
+			.catch(() => {});
+		return task;
+	}
+
+	#beginTransform(): ActiveTransform {
+		this.#assertReady();
+		if (this.#active || this.#previewTask || this.#profileRead || this.#chartTask || this.#transformWork)
+			throw new WorkbenchError(409, "Another analytical operation is active.");
+		const work = { controller: new AbortController(), done: deferred<void>(), committing: false };
+		this.#transformWork = work;
+		return work;
+	}
+
+	#checkTransform(signal: AbortSignal): void {
+		if (signal.aborted)
+			throw signal.reason instanceof WorkbenchError
+				? signal.reason
+				: new WorkbenchError(409, "Transformation was cancelled.");
+		this.#assertReady();
+	}
+
+	async previewTransform(
+		projectId: string,
+		datasetId: string,
+		value: unknown,
+		signal?: AbortSignal,
+	): Promise<TransformPreview> {
+		const dataset = this.#dataset(projectId, datasetId);
+		if (
+			typeof value === "object" &&
+			value !== null &&
+			"datasetVersionId" in value &&
+			value.datasetVersionId !== dataset.currentVersionId
+		)
+			throw new WorkbenchError(409, "Dataset version changed. Generate a new preview.");
+		let spec: TransformSpec;
+		try {
+			spec = parseTransformSpec(value, dataset.schema, dataset.currentVersionId);
+		} catch {
+			throw new WorkbenchError(400, "Transformation specification is invalid for this dataset.");
+		}
+		if (dataset.versions.length >= TRANSFORM_MAX_VERSIONS)
+			throw new WorkbenchError(409, "This dataset has reached the retained version limit.");
+		const work = this.#beginTransform();
+		const abort = () => work.controller.abort(new WorkbenchError(409, "Transformation preview was cancelled."));
+		signal?.addEventListener("abort", abort, { once: true });
+		if (signal?.aborted) abort();
+		const timer = setTimeout(
+			() => work.controller.abort(new WorkbenchError(408, "Transformation preview exceeded the five-minute limit.")),
+			PROCESSING_TIMEOUT_MS,
+		);
+		timer.unref();
+		let record: TransformRecord | undefined;
+		let directory: string | undefined;
+		let retained = false;
+		try {
+			await this.#expireTransformDrafts();
+			if (this.#metadata!.transformDrafts().length >= MAX_TRANSFORM_DRAFTS)
+				throw new WorkbenchError(
+					409,
+					"Four transformation previews are retained. Discard or approve one before previewing another.",
+				);
+			const usage = this.#metadata!.transformUsage(projectId, datasetId);
+			if (
+				usage.count >= MAX_TRANSFORM_RECORDS ||
+				usage.bytes + TRANSFORM_RESULT_BYTES + 64 * 1024 > MAX_TRANSFORM_HISTORY_BYTES
+			)
+				throw new WorkbenchError(409, "This dataset has reached its transformation audit storage limit.");
+			const createdAt = new Date().toISOString();
+			record = {
+				id: randomUUID(),
+				projectId,
+				datasetId,
+				actor: "local-user",
+				createdAt,
+				completedAt: null,
+				inputVersionId: dataset.currentVersionId,
+				outputVersionId: null,
+				spec,
+				state: "previewed",
+				result: null,
+				error: null,
+			};
+			this.#metadata!.putTransform(record);
+			this.#checkTransform(work.controller.signal);
+			const revision = this.#metadata!.transformTimeline(projectId, datasetId).revision;
+			const input = await this.#profileInput(dataset, work.controller.signal);
+			const facts = dataset.versions.find((version) => version.id === dataset.currentVersionId)!.facts!;
+			if (input.datasetVersionHash !== facts.artifactSha256)
+				throw new WorkbenchError(409, "Input version failed its immutable artifact integrity check.");
+			directory = this.#draftDirectory(record.id);
+			await mkdir(directory);
+			this.#checkTransform(work.controller.signal);
+			const result = await runAnalytical(
+				{
+					kind: "transform",
+					artifactPath: this.#profileArtifact(dataset),
+					tempPath: join(directory, "temp"),
+					outputPath: join(directory, "data.duckdb"),
+					input,
+					spec,
+				},
+				undefined,
+				work.controller.signal,
+			).catch((error: Error) => {
+				throw new WorkbenchError(400, error.message);
+			});
+			this.#checkTransform(work.controller.signal);
+			if (
+				result.kind !== "transform" ||
+				result.impact.inputVersionId !== input.datasetVersionId ||
+				result.impact.inputHash !== input.datasetVersionHash ||
+				!isDeepStrictEqual(result.impact.spec, spec)
+			)
+				throw new WorkbenchError(500, "Unexpected transformation worker response.");
+			const current = await this.#profileInput(dataset, work.controller.signal);
+			const output = await this.#profileInput(dataset, work.controller.signal, join(directory, "data.duckdb"));
+			await rm(join(directory, "temp"), { recursive: true, force: true });
+			this.#checkTransform(work.controller.signal);
+			if (
+				current.datasetVersionHash !== input.datasetVersionHash ||
+				this.#metadata!.dataset(projectId, datasetId)?.currentVersionId !== input.datasetVersionId ||
+				this.#metadata!.transformTimeline(projectId, datasetId).revision !== revision
+			)
+				throw new WorkbenchError(409, "Dataset changed while preparing the preview.");
+			record.result = result.impact;
+			record.completedAt = new Date().toISOString();
+			const draft: TransformDraft = {
+				id: record.id,
+				projectId,
+				datasetId,
+				outputVersionId: randomUUID(),
+				inputHash: input.datasetVersionHash,
+				outputHash: output.datasetVersionHash,
+				storageBytes: output.storageBytes,
+				createdAt,
+				expiresAt: new Date(Date.now() + TRANSFORM_DRAFT_TTL_MS).toISOString(),
+				revision,
+			};
+			const saved = record;
+			this.#metadata!.transaction(() => {
+				this.#metadata!.putTransform(saved);
+				this.#metadata!.putTransformDraft(draft);
+			});
+			retained = true;
+			return { id: draft.id, projectId, datasetId, createdAt, expiresAt: draft.expiresAt, impact: result.impact };
+		} catch (error) {
+			const failure = work.controller.signal.aborted
+				? work.controller.signal.reason instanceof WorkbenchError
+					? work.controller.signal.reason
+					: new WorkbenchError(409, "Transformation was cancelled.")
+				: error instanceof WorkbenchError
+					? error
+					: new WorkbenchError(500, "Transformation preview failed. Check disk access and available space.");
+			if (record) {
+				record.state = work.controller.signal.aborted && failure.status !== 408 ? "cancelled" : "failed";
+				record.completedAt = new Date().toISOString();
+				record.error = failure.message;
+				this.#metadata!.putTransform(record);
+			}
+			throw failure;
+		} finally {
+			clearTimeout(timer);
+			signal?.removeEventListener("abort", abort);
+			try {
+				if (directory && !retained)
+					await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+			} finally {
+				this.#transformWork = undefined;
+				work.done.resolve();
+				this.#scheduleTransformExpiry();
+			}
+		}
+	}
+
+	async applyTransform(projectId: string, datasetId: string, value: unknown): Promise<Dataset> {
+		const dataset = this.#dataset(projectId, datasetId);
+		if (
+			typeof value !== "object" ||
+			value === null ||
+			Array.isArray(value) ||
+			Reflect.ownKeys(value).length !== 2 ||
+			!Object.hasOwn(value, "previewId") ||
+			!Object.hasOwn(value, "approved") ||
+			!("previewId" in value) ||
+			typeof value.previewId !== "string" ||
+			!("approved" in value) ||
+			value.approved !== true
+		)
+			throw new WorkbenchError(400, "Explicit approval and a preview identifier are required.");
+		validateId(value.previewId);
+		const record = this.#metadata!.transform(projectId, datasetId, value.previewId);
+		if (!record) throw new WorkbenchError(404, "Preview was not found in this dataset.");
+		const work = this.#beginTransform();
+		let published: string | undefined;
+		let committed = false;
+		let claimed = false;
+		try {
+			await this.#expireTransformDrafts();
+			const draft = this.#metadata!.transformDraft(projectId, datasetId, record.id);
+			if (!draft || record.state !== "previewed" || !record.result)
+				throw new WorkbenchError(409, "This preview is no longer available for approval.");
+			claimed = true;
+			const timeline = this.#metadata!.transformTimeline(projectId, datasetId);
+			if (
+				dataset.currentVersionId !== record.inputVersionId ||
+				timeline.revision !== draft.revision ||
+				dataset.versions.length >= TRANSFORM_MAX_VERSIONS
+			)
+				throw new WorkbenchError(409, "Dataset changed. Generate and approve a new preview.");
+			const input = await this.#profileInput(dataset, work.controller.signal);
+			const directory = this.#draftDirectory(draft.id);
+			const output = await this.#profileInput(dataset, work.controller.signal, join(directory, "data.duckdb"));
+			this.#checkTransform(work.controller.signal);
+			if (
+				input.datasetVersionHash !== draft.inputHash ||
+				output.datasetVersionHash !== draft.outputHash ||
+				output.storageBytes !== draft.storageBytes
+			)
+				throw new WorkbenchError(409, "Preview or input artifact changed. Nothing was applied.");
+			if (Date.parse(draft.expiresAt) <= Date.now())
+				throw new WorkbenchError(409, "Preview expired before approval completed.");
+			const now = new Date().toISOString();
+			const facts: DatasetVersionFacts = {
+				rowCount: record.result.rowCount,
+				schema: record.result.schema,
+				columns: record.result.columns,
+				profileVersion: PROFILE_VERSION,
+				profiledAt: now,
+				artifactSha256: draft.outputHash,
+			};
+			const destination = join(this.#datasetPath(projectId, datasetId), "versions", draft.outputVersionId);
+			const version: DatasetVersion = {
+				id: draft.outputVersionId,
+				kind: "derived",
+				parentVersionId: record.inputVersionId,
+				storageLocation: relative(this.#root, join(destination, "data.duckdb")),
+				createdAt: now,
+				facts,
+				operation: {
+					kind: "transform",
+					engine: "duckdb",
+					version: record.result.engineVersion,
+					spec: record.spec,
+					recordId: record.id,
+				},
+			};
+			const updated = this.#versionDataset({ ...dataset, versions: [...dataset.versions, version] }, version);
+			work.committing = true;
+			await rename(directory, destination);
+			published = destination;
+			record.state = "applied";
+			record.completedAt = now;
+			record.outputVersionId = version.id;
+			this.#metadata!.transaction(() => {
+				if (
+					this.#metadata!.dataset(projectId, datasetId)?.currentVersionId !== record.inputVersionId ||
+					this.#metadata!.transformTimeline(projectId, datasetId).revision !== draft.revision
+				)
+					throw new WorkbenchError(409, "Dataset changed before publication.");
+				this.#metadata!.putDataset(updated);
+				this.#metadata!.putTransformTimeline(projectId, datasetId, {
+					undo: [...timeline.undo, dataset.currentVersionId],
+					redo: [],
+					revision: timeline.revision + 1,
+				});
+				this.#metadata!.deleteTransformDraft(projectId, datasetId, record.id);
+				this.#metadata!.putTransform(record);
+			});
+			committed = true;
+			return updated;
+		} catch (error) {
+			const failure =
+				error instanceof WorkbenchError
+					? error
+					: new WorkbenchError(500, "Transformation publication failed. The active dataset was not changed.");
+			if (claimed) {
+				record.outputVersionId = null;
+				await this.#removeDraft(record, work.controller.signal.aborted ? "cancelled" : "failed", failure.message);
+			}
+			throw failure;
+		} finally {
+			try {
+				if (published && !committed)
+					await rm(published, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+			} finally {
+				this.#transformWork = undefined;
+				work.done.resolve();
+				this.#scheduleTransformExpiry();
+			}
+		}
+	}
+
+	#versionDataset(dataset: Dataset, version: DatasetVersion): Dataset {
+		if (!version.facts || version.kind !== "derived")
+			throw new WorkbenchError(500, "Dataset version facts are unavailable.");
+		return {
+			...dataset,
+			currentVersionId: version.id,
+			updatedAt: new Date().toISOString(),
+			rowCount: version.facts.rowCount,
+			columnCount: version.facts.schema.length,
+			schema: version.facts.schema,
+			columns: version.facts.columns,
+			profileVersion: version.facts.profileVersion,
+			profiledAt: version.facts.profiledAt,
+		};
+	}
+
+	async transformHistory(projectId: string, datasetId: string): Promise<TransformHistory> {
+		this.#dataset(projectId, datasetId);
+		if (!this.#transformWork) await this.#expireTransformDrafts();
+		const dataset = this.#dataset(projectId, datasetId);
+		const timeline = this.#metadata!.transformTimeline(projectId, datasetId);
+		return {
+			currentVersionId: dataset.currentVersionId,
+			canUndo: timeline.undo.length > 0,
+			canRedo: timeline.redo.length > 0,
+			records: this.#metadata!.transforms(projectId, datasetId),
+		};
+	}
+
+	async discardTransform(projectId: string, datasetId: string, previewId: string): Promise<{ discarded: true }> {
+		this.#dataset(projectId, datasetId);
+		validateId(previewId);
+		const record = this.#metadata!.transform(projectId, datasetId, previewId);
+		if (!record) throw new WorkbenchError(404, "Preview was not found in this dataset.");
+		const work = this.#beginTransform();
+		try {
+			await this.#expireTransformDrafts();
+			if (!this.#metadata!.transformDraft(projectId, datasetId, previewId))
+				throw new WorkbenchError(409, "This preview is no longer available.");
+			await this.#removeDraft(record, "cancelled", "The user discarded this preview without applying it.");
+			return { discarded: true };
+		} finally {
+			this.#transformWork = undefined;
+			work.done.resolve();
+			this.#scheduleTransformExpiry();
+		}
+	}
+
+	async undoTransform(projectId: string, datasetId: string, value: unknown): Promise<Dataset> {
+		return this.#moveTransform(projectId, datasetId, value, "undo");
+	}
+	async redoTransform(projectId: string, datasetId: string, value: unknown): Promise<Dataset> {
+		return this.#moveTransform(projectId, datasetId, value, "redo");
+	}
+	async #moveTransform(
+		projectId: string,
+		datasetId: string,
+		value: unknown,
+		direction: "undo" | "redo",
+	): Promise<Dataset> {
+		const dataset = this.#dataset(projectId, datasetId);
+		if (
+			typeof value !== "object" ||
+			value === null ||
+			Array.isArray(value) ||
+			Reflect.ownKeys(value).length !== 1 ||
+			!Object.hasOwn(value, "expectedVersionId") ||
+			!("expectedVersionId" in value) ||
+			typeof value.expectedVersionId !== "string"
+		)
+			throw new WorkbenchError(400, "Expected dataset version is required.");
+		validateId(value.expectedVersionId);
+		if (value.expectedVersionId !== dataset.currentVersionId)
+			throw new WorkbenchError(409, "Dataset version changed. Refresh before changing history.");
+		const work = this.#beginTransform();
+		try {
+			const timeline = this.#metadata!.transformTimeline(projectId, datasetId);
+			const targetId = timeline[direction].at(-1);
+			if (!targetId) throw new WorkbenchError(409, `There is no transformation to ${direction}.`);
+			const version = dataset.versions.find((item) => item.id === targetId);
+			if (!version) throw new WorkbenchError(500, "History refers to a missing dataset version.");
+			const updated = this.#versionDataset(dataset, version);
+			const input = await this.#profileInput(updated, work.controller.signal);
+			this.#checkTransform(work.controller.signal);
+			if (input.datasetVersionHash !== version.facts!.artifactSha256)
+				throw new WorkbenchError(409, "Historical version failed its immutable artifact integrity check.");
+			timeline[direction].pop();
+			timeline[direction === "undo" ? "redo" : "undo"].push(dataset.currentVersionId);
+			timeline.revision++;
+			work.committing = true;
+			this.#metadata!.transaction(() => {
+				this.#metadata!.putDataset(updated);
+				this.#metadata!.putTransformTimeline(projectId, datasetId, timeline);
+			});
+			return updated;
+		} finally {
+			this.#transformWork = undefined;
+			work.done.resolve();
 		}
 	}
 
@@ -400,13 +977,17 @@ export class WorkbenchStore {
 		return join(this.#root, "projects", projectId, "datasets", datasetId);
 	}
 
-	async getDataset(projectId: string, datasetId: string): Promise<Dataset> {
+	#dataset(projectId: string, datasetId: string): Dataset {
 		this.#assertReady();
 		this.#project(projectId);
 		validateId(datasetId);
 		const dataset = this.#metadata!.dataset(projectId, datasetId);
 		if (!dataset) throw new WorkbenchError(404, "Requested dataset was not found in this project.");
 		return dataset;
+	}
+
+	async getDataset(projectId: string, datasetId: string): Promise<Dataset> {
+		return this.#dataset(projectId, datasetId);
 	}
 
 	async assistantRuns(projectId: string, datasetId: string): Promise<AssistantRun[]> {
@@ -422,6 +1003,49 @@ export class WorkbenchStore {
 		const run = this.#metadata!.assistantRun(projectId, datasetId, id);
 		if (!run) throw new WorkbenchError(404, "Assistant run was not found in this dataset or has expired.");
 		return run;
+	}
+	async conversations(projectId: string, datasetId: string): Promise<Conversation[]> {
+		await this.getDataset(projectId, datasetId);
+		this.#assertReady();
+		return this.#metadata!.conversations(projectId, datasetId);
+	}
+
+	async conversation(projectId: string, datasetId: string, id: string): Promise<Conversation> {
+		await this.getDataset(projectId, datasetId);
+		this.#assertReady();
+		validateId(id);
+		const conversation = this.#metadata!.conversation(projectId, datasetId, id);
+		if (!conversation) throw new WorkbenchError(404, "Conversation was not found in this dataset.");
+		return conversation;
+	}
+
+	async putConversation(conversation: Conversation): Promise<void> {
+		await this.getDataset(conversation.projectId, conversation.datasetId);
+		this.#assertReady();
+		validateId(conversation.id);
+		if (
+			conversation.scope.projectId !== conversation.projectId ||
+			conversation.scope.datasetId !== conversation.datasetId ||
+			conversation.scope.datasetVersionId !== conversation.scope.context.dataset.versionId ||
+			typeof conversation.title !== "string" ||
+			!conversation.title.trim() ||
+			conversation.title.length > 120 ||
+			(conversation.archivedAt !== null && !Number.isFinite(Date.parse(conversation.archivedAt))) ||
+			!["ready", "running", "failed"].includes(conversation.state) ||
+			!Array.isArray(conversation.messages) ||
+			conversation.messages.some(
+				(message) => !validateConversationMessage(message) || message.text.length > 16 * 1024,
+			)
+		)
+			throw new WorkbenchError(400, "Conversation state is invalid.");
+		this.#metadata!.transaction(() => this.#metadata!.putConversation(conversation));
+	}
+
+	async conversationSessionDir(projectId: string, datasetId: string): Promise<string> {
+		await this.getDataset(projectId, datasetId);
+		const directory = join(this.#datasetPath(projectId, datasetId), "assistant-sessions");
+		await mkdir(directory, { recursive: true });
+		return directory;
 	}
 
 	#assistantSuggestion(run: AssistantRun, id: string): AssistantSuggestion {
@@ -655,7 +1279,7 @@ export class WorkbenchStore {
 		const versionId = value.datasetVersionId;
 		if (
 			typeof versionId !== "string" ||
-			!dataset.versions.some((version) => version.id === versionId && version.kind === "derived") ||
+			!dataset.versions.some((version) => version.id === versionId && version.kind === "derived" && version.facts) ||
 			(currentOnly && versionId !== dataset.currentVersionId)
 		)
 			throw new WorkbenchError(
@@ -663,7 +1287,11 @@ export class WorkbenchStore {
 				"Chart belongs to a different dataset version. Select the current version before previewing.",
 			);
 		try {
-			return parseChartSpec(value, dataset.schema, versionId);
+			return parseChartSpec(
+				value,
+				dataset.versions.find((version) => version.id === versionId)!.facts!.schema,
+				versionId,
+			);
 		} catch {
 			throw new WorkbenchError(400, "Chart specification is invalid for this dataset.");
 		}
@@ -734,7 +1362,7 @@ export class WorkbenchStore {
 		const dataset = await this.getDataset(projectId, datasetId);
 		this.#assertReady();
 		const spec = this.#chartSpec(dataset, value, true);
-		if (this.#active || this.#previewTask || this.#profileRead || this.#chartTask)
+		if (this.#active || this.#previewTask || this.#profileRead || this.#chartTask || this.#transformWork)
 			throw new WorkbenchError(409, "Another analytical operation is active.");
 		const controller = new AbortController();
 		const abort = () => controller.abort(new WorkbenchError(409, "Chart preview was cancelled."));
@@ -818,7 +1446,7 @@ export class WorkbenchStore {
 			throw new WorkbenchError(400, "Preview limit must be between 1 and 500 rows.");
 		const dataset = await this.getDataset(projectId, datasetId);
 		this.#assertReady();
-		if (this.#active || this.#previewTask || this.#profileRead || this.#chartTask)
+		if (this.#active || this.#previewTask || this.#profileRead || this.#chartTask || this.#transformWork)
 			throw new WorkbenchError(409, "An analytical operation is active. Retry the preview when it finishes.");
 		if (offset >= dataset.rowCount) return { offset, limit, total: dataset.rowCount, rows: [] };
 		const version = dataset.versions.find((item) => item.id === dataset.currentVersionId && item.kind === "derived");
@@ -914,7 +1542,7 @@ export class WorkbenchStore {
 		format: DatasetFormat = dataset?.format ?? "csv",
 	): ActiveJob {
 		this.#assertReady();
-		if (this.#active || this.#previewTask || this.#profileRead || this.#chartTask)
+		if (this.#active || this.#previewTask || this.#profileRead || this.#chartTask || this.#transformWork)
 			throw new WorkbenchError(409, "Another analytical operation is active.");
 		const job: ImportJob = {
 			id: randomUUID(),
@@ -1019,6 +1647,10 @@ export class WorkbenchStore {
 
 	async reprofile(projectId: string, datasetId: string): Promise<ImportJob> {
 		const dataset = await this.getDataset(projectId, datasetId);
+		if (dataset.versions.find((version) => version.id === dataset.currentVersionId)?.operation.kind === "transform")
+			return this.profile(projectId, datasetId);
+		if (dataset.versions.length >= TRANSFORM_MAX_VERSIONS)
+			throw new WorkbenchError(409, "This dataset has reached the retained version limit.");
 		const active = this.#reserve(projectId, dataset.name, "reprofile", dataset);
 		active.task = this.#run(active);
 		return { ...active.job };
@@ -1032,7 +1664,7 @@ export class WorkbenchStore {
 				return this.#profileRead.task;
 			throw new WorkbenchError(409, "Another profile read is active.");
 		}
-		if (this.#chartTask)
+		if (this.#chartTask || this.#transformWork)
 			throw new WorkbenchError(409, "A chart preview is active. Retry the profile read when it finishes.");
 		const controller = new AbortController();
 		const task = (async () => {
@@ -1067,10 +1699,10 @@ export class WorkbenchStore {
 		return this.#storedPath(version.storageLocation);
 	}
 
-	async #profileInput(dataset: Dataset, signal: AbortSignal): Promise<ProfileInput> {
+	async #profileInput(dataset: Dataset, signal: AbortSignal, artifactPath?: string): Promise<ProfileInput> {
 		const deadline = Date.now() + PROCESSING_TIMEOUT_MS;
 		try {
-			const path = this.#profileArtifact(dataset);
+			const path = artifactPath ?? this.#profileArtifact(dataset);
 			const pathBefore = await lstat(path);
 			if (!pathBefore.isFile() || pathBefore.isSymbolicLink())
 				throw new WorkbenchError(409, "Profile artifact must be a regular file, not a symbolic link.");
@@ -1269,6 +1901,14 @@ export class WorkbenchStore {
 			storageLocation: relative(this.#root, join(directory, "versions", versionId, "data.duckdb")),
 			createdAt: now,
 			operation: { kind: "ingest" as const, engine: "duckdb", version: result.engineVersion },
+			facts: {
+				rowCount: result.rowCount,
+				schema: result.schema,
+				columns: result.columns,
+				profileVersion: PROFILE_VERSION,
+				profiledAt: now,
+				artifactSha256: "",
+			},
 		};
 		const duplicate = this.#metadata!.duplicate(projectId, result.sha256, format);
 		return {
@@ -1380,6 +2020,13 @@ export class WorkbenchStore {
 				active.dataset?.createdAt ?? new Date().toISOString(),
 				active.dataset,
 			);
+			const artifactInput = await this.#profileInput(
+				dataset,
+				active.controller.signal,
+				join(versionDirectory, "data.duckdb"),
+			);
+			dataset.versions.find((version) => version.id === versionId)!.facts!.artifactSha256 =
+				artifactInput.datasetVersionHash;
 			await rm(join(active.stagingPath, "temp"), { recursive: true, force: true });
 			if (active.stopError) throw active.stopError;
 			active.committing = true;
@@ -1400,6 +2047,14 @@ export class WorkbenchStore {
 			this.#metadata!.transaction(() => {
 				this.#metadata!.putDataset(dataset);
 				this.#metadata!.putJob(active.job);
+				if (active.dataset) {
+					const timeline = this.#metadata!.transformTimeline(dataset.projectId, id);
+					this.#metadata!.putTransformTimeline(dataset.projectId, id, {
+						undo: [],
+						redo: [],
+						revision: timeline.revision + 1,
+					});
+				}
 			});
 			completed = true;
 		} catch (error) {
@@ -1438,12 +2093,19 @@ export class WorkbenchStore {
 
 	close(): Promise<void> {
 		this.#closing = true;
+		const transform = this.#transformWork;
+		if (transform && !transform.committing)
+			transform.controller.abort(new WorkbenchError(409, "Transformation was cancelled during shutdown."));
 		this.#closeTask ??= this.#close();
 		return this.#closeTask;
 	}
 
 	async #close(): Promise<void> {
 		await this.#initializing?.catch(() => {});
+		clearTimeout(this.#transformExpiry);
+		const transform = this.#transformWork;
+		if (transform) await transform.done.promise;
+		await this.#transformCleanup;
 		this.#chartController?.abort();
 		await this.#chartTask?.catch(() => {});
 		const active = this.#active;

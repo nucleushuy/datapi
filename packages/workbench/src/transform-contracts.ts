@@ -11,15 +11,41 @@ export const TRANSFORM_DRAFT_TTL_MS = 10 * 60_000;
 export type TransformExpression =
 	| { kind: "column"; column: number }
 	| { kind: "literal"; value: string | number | null }
-	| { kind: "binary"; operator: "add" | "subtract" | "multiply" | "divide"; left: TransformExpression; right: TransformExpression }
-	| { kind: "call"; function: "abs" | "round" | "lower" | "upper" | "trim" | "length" | "coalesce"; args: TransformExpression[] };
+	| {
+			kind: "binary";
+			operator: "add" | "subtract" | "multiply" | "divide";
+			left: TransformExpression;
+			right: TransformExpression;
+	  }
+	| {
+			kind: "call";
+			function: "abs" | "round" | "lower" | "upper" | "trim" | "length" | "coalesce";
+			args: TransformExpression[];
+	  };
 
 export type TransformOperation =
 	| { kind: "rename"; column: number; name: string }
-	| { kind: "cast"; column: number; type: "text" | "number" | "integer" | "boolean" | "date" | "timestamp"; invalid: "error" | "null" }
+	| {
+			kind: "cast";
+			column: number;
+			type: "text" | "number" | "integer" | "boolean" | "date" | "timestamp";
+			invalid: "error" | "null";
+	  }
 	| { kind: "drop"; columns: number[] }
-	| { kind: "filter"; column: number; operator: "eq" | "ne" | "lt" | "lte" | "gt" | "gte" | "contains" | "is-null" | "not-null"; comparison: "text" | "number"; value: string | null }
-	| { kind: "missing"; columns: number[]; method: "constant" | "mean" | "median" | "drop"; missing: "null" | "empty" | "both"; value: string | null }
+	| {
+			kind: "filter";
+			column: number;
+			operator: "eq" | "ne" | "lt" | "lte" | "gt" | "gte" | "contains" | "is-null" | "not-null";
+			comparison: "text" | "number";
+			value: string | null;
+	  }
+	| {
+			kind: "missing";
+			columns: number[];
+			method: "constant" | "mean" | "median" | "drop";
+			missing: "null" | "empty" | "both";
+			value: string | null;
+	  }
 	| { kind: "deduplicate"; columns: number[] }
 	| { kind: "map"; column: number; entries: { from: string; to: string | null }[]; unmatched: "keep" | "null" }
 	| { kind: "datetime"; column: number; component: "year" | "month" | "day" | "weekday" | "hour"; name: string }

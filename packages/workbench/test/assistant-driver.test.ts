@@ -16,6 +16,7 @@ import {
 	PiAssistantDriver,
 	parseAssistantWorkerRequest,
 } from "../src/assistant-driver.ts";
+import { PiConversationDriver } from "../src/conversation-driver.ts";
 
 const usage = { input: 7, output: 3, cacheRead: 0, cacheWrite: 0, totalTokens: 10 };
 const payload = {
@@ -202,7 +203,7 @@ describe("actual isolated assistant runtime", { concurrency: false, timeout: 180
 			configured.models[0].name = "caller mutation";
 			assert.notEqual((await driver.models()).models[0].name, "caller mutation");
 			assert.ok(!JSON.stringify(configured).includes("literal-test-not-a-real-key"));
-			assert.match(configured.guidance, /memory.*restart/);
+			assert.match(configured.guidance, /Pi stores/);
 			assert.ok((await fresh.models()).models.every((model) => !model.configured));
 			await driver.deleteCredential("openai");
 			assert.ok((await driver.models()).models.every((model) => !model.configured));
@@ -219,6 +220,23 @@ describe("actual isolated assistant runtime", { concurrency: false, timeout: 180
 			else process.env.OPENAI_API_KEY = previous;
 			await driver.close();
 			await fresh.close();
+		}
+	});
+
+	it("persists provider authorization through Pi credential storage", async (context) => {
+		const root = await mkdtemp(join(tmpdir(), "pi-conversation-auth-"));
+		context.after(() => rm(root, { recursive: true, force: true }));
+		const first = new PiConversationDriver(root);
+		const second = new PiConversationDriver(root);
+		try {
+			await first.setCredential("openai", "literal-test-not-a-real-key");
+			assert.deepEqual(await first.authorizedProviders(), ["openai"]);
+			assert.deepEqual(await second.authorizedProviders(), ["openai"]);
+			await second.deleteCredential("openai");
+			assert.deepEqual(await first.authorizedProviders(), []);
+		} finally {
+			await first.close();
+			await second.close();
 		}
 	});
 	it("cancels pre-start and active child work and closes outstanding catalog workers", async () => {

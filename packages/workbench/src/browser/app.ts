@@ -9,15 +9,17 @@ import {
 	type Preview,
 	type Project,
 } from "../contracts.ts";
+import type { Conversation, ConversationEvent } from "../conversation-contracts.ts";
 import {
 	type ColumnProfile,
 	type DatasetProfile,
 	PROFILER_VERSION,
 	type ProfileResponse,
 } from "../profile-contracts.ts";
-import { type AssistantUiContext, initializeAssistant } from "./assistant.ts";
 import { initializeChartStudio } from "./chart-studio.ts";
+import { type ConversationUiContext, initializeConversation } from "./conversation.ts";
 import { initializeShell } from "./shell.ts";
+import { initializeTransform } from "./transform.ts";
 
 const shell = initializeShell(document, window);
 
@@ -85,6 +87,8 @@ const ui = {
 	previewView: element<HTMLButtonElement>("view-preview"),
 	profileView: element<HTMLButtonElement>("view-profile"),
 	provenanceView: element<HTMLButtonElement>("view-provenance"),
+	transformView: element<HTMLButtonElement>("view-transform"),
+	transformPanel: element("transform-panel"),
 	previewStatus: element("preview-status"),
 	retryPreview: element<HTMLButtonElement>("retry-preview"),
 	previewScroll: element("preview-scroll"),
@@ -174,7 +178,7 @@ class ApiError extends Error {
 	}
 }
 
-type View = "preview" | "provenance";
+type View = "preview" | "provenance" | "transform";
 let token = "";
 let ready = false;
 let maxUploadBytes = MAX_UPLOAD_BYTES;
@@ -211,6 +215,21 @@ let currentPreview: Preview | null = null;
 let operation: Operation | null = null;
 let pendingRetry: Operation | null = null;
 let chartBusy = false;
+let transformBusy = false;
+const transformController = initializeTransform(ui.transformPanel, {
+	api,
+	message,
+	onBusy(busy) {
+		transformBusy = busy;
+		updateControls();
+	},
+	async onChanged(value) {
+		if (projectId !== value.projectId || datasetId !== value.id) return;
+		datasets = datasets.map((item) => (item.id === value.id ? value : item));
+		renderDatasetList();
+		await selectDataset(value.id, true);
+	},
+});
 const chartStudio = initializeChartStudio(element("chart-studio"), {
 	api,
 	message,
@@ -224,31 +243,16 @@ const chartStudio = initializeChartStudio(element("chart-studio"), {
 	},
 	onContextChange() {
 		const context = currentAssistantContext();
-		if (context) assistant.update(context);
+		if (context) conversation.update(context);
 	},
 });
-const assistant = initializeAssistant(element("assistant-workspace"), element("assistant-suggestions"), {
+const conversation = initializeConversation(element("chat-workspace"), {
 	api,
+	stream: streamConversation,
 	message,
-	currentContext: currentAssistantContext,
-	onProfile() {
-		ui.runProfile.scrollIntoView?.({ block: "center" });
-		ui.runProfile.focus();
-	},
-	onSuggestions() {
-		shell.selectRight("suggestions", true);
-	},
-	onOpenChart(spec) {
-		chartStudio.applySpec(spec);
-		shell.selectCenter("visualize", true);
-	},
-	onPrivacy(state, detail) {
-		element("assistant-privacy-state").textContent = state;
-		element("assistant-privacy-detail").textContent = detail;
-	},
 });
 
-function currentAssistantContext(): AssistantUiContext | null {
+function currentAssistantContext(): ConversationUiContext | null {
 	if (!projectId || !dataset) return null;
 	const selection = chartStudio.getSelection();
 	return {
@@ -333,6 +337,53 @@ async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
 	}
 	return body as T;
 }
+async function streamConversation(
+	path: string,
+	message: string,
+	onEvent: (event: ConversationEvent) => void,
+): Promise<Conversation> {
+	const response = await fetch(path, {
+		method: "POST",
+		headers: { "Content-Type": "application/json", "X-Workbench-Token": token },
+		body: JSON.stringify({ message }),
+		credentials: "same-origin",
+		redirect: "error",
+	});
+	if (!response.ok || !response.body) {
+		const body = await response.json().catch(() => null);
+		const detail =
+			typeof body === "object" && body !== null && "error" in body && typeof body.error === "string"
+				? body.error
+				: `The request could not be completed (${response.status}).`;
+		throw new ApiError(detail, response.status);
+	}
+	const reader = response.body.getReader();
+	const decoder = new TextDecoder("utf-8", { fatal: true });
+	let source = "";
+	let result: Conversation | null = null;
+	for (;;) {
+		const chunk = await reader.read();
+		if (chunk.done) break;
+		source += decoder.decode(chunk.value, { stream: true });
+		for (;;) {
+			const boundary = source.indexOf("\n");
+			if (boundary < 0) break;
+			const line = source.slice(0, boundary);
+			source = source.slice(boundary + 1);
+			if (!line) continue;
+			const frame: unknown = JSON.parse(line);
+			if (typeof frame !== "object" || frame === null || Array.isArray(frame) || !("type" in frame))
+				throw new ApiError("The local server returned an invalid chat stream.", response.status);
+			if (frame.type === "event" && "event" in frame) onEvent(frame.event as ConversationEvent);
+			else if (frame.type === "conversation" && "conversation" in frame) result = frame.conversation as Conversation;
+			else if (frame.type === "error" && "error" in frame && typeof frame.error === "string")
+				throw new ApiError(frame.error, response.status);
+			else throw new ApiError("The local server returned an invalid chat stream.", response.status);
+		}
+	}
+	if (source || !result) throw new ApiError("The chat stream ended before a final response.", response.status);
+	return result;
+}
 function projectPath(id: string): string {
 	return `/api/projects/${encodeURIComponent(id)}/datasets`;
 }
@@ -346,30 +397,31 @@ function operationActive(): boolean {
 	return operation !== null && !operation.finalized;
 }
 function updateControls(): void {
+	const analyticalBusy = chartBusy || transformBusy;
 	ui.projectSelect.disabled = !ready || projects.length === 0;
 	ui.projectName.disabled = !ready || creatingProject;
 	ui.projectDescriptionInput.disabled = !ready || creatingProject;
 	ui.projectPreviewLimit.disabled = !ready || creatingProject;
 	ui.createProject.disabled = !ready || creatingProject;
 	ui.createProject.textContent = creatingProject ? "Creating…" : "Create project";
-	ui.importButton.disabled = !ready || projectId === null || operationActive() || chartBusy;
-	ui.emptyAction.disabled = !ready || chartBusy || (projectId !== null && (operationActive() || listingDatasets));
-	ui.recompute.disabled = !ready || dataset === null || operationActive() || chartBusy;
+	ui.importButton.disabled = !ready || projectId === null || operationActive() || analyticalBusy;
+	ui.emptyAction.disabled = !ready || analyticalBusy || (projectId !== null && (operationActive() || listingDatasets));
+	ui.recompute.disabled = !ready || dataset === null || operationActive() || analyticalBusy;
 	ui.runProfile.disabled =
-		!ready || dataset === null || operationActive() || previewLoading || profileLoading || chartBusy;
-	ui.retryProfile.disabled = !ready || operationActive() || previewLoading || profileLoading || chartBusy;
-	ui.previewLimit.disabled = !ready || dataset === null || chartBusy;
-	ui.retryImport.disabled = !ready || operationActive() || chartBusy;
-	ui.retryPreview.disabled = chartBusy;
-	ui.previousPage.disabled = chartBusy || previewLoading || currentPreview === null || pageIndex === 0;
+		!ready || dataset === null || operationActive() || previewLoading || profileLoading || analyticalBusy;
+	ui.retryProfile.disabled = !ready || operationActive() || previewLoading || profileLoading || analyticalBusy;
+	ui.previewLimit.disabled = !ready || dataset === null || analyticalBusy;
+	ui.retryImport.disabled = !ready || operationActive() || analyticalBusy;
+	ui.retryPreview.disabled = analyticalBusy;
+	ui.previousPage.disabled = analyticalBusy || previewLoading || currentPreview === null || pageIndex === 0;
 	ui.nextPage.disabled =
-		chartBusy ||
+		analyticalBusy ||
 		previewLoading ||
 		currentPreview === null ||
 		nextOffset >= currentPreview.total ||
 		currentPreview.rows.length === 0;
-	chartStudio.setBlocked(!ready || operationActive() || previewLoading || profileLoading);
-	assistant.setBlocked(!ready || operationActive() || previewLoading || profileLoading || chartBusy);
+	chartStudio.setBlocked(!ready || operationActive() || previewLoading || profileLoading || transformBusy);
+	transformController.setBlocked(!ready || operationActive() || previewLoading || profileLoading || chartBusy);
 }
 
 function previewRowLimit(preferred: number): number {
@@ -460,7 +512,8 @@ function renderEmpty(): void {
 }
 
 function resetDataset(): void {
-	assistant.clear();
+	transformController.clear();
+	conversation.update(null);
 	chartStudio.clear();
 	datasetVersion++;
 	previewVersion++;
@@ -609,23 +662,35 @@ async function selectDataset(id: string, preserveView = false): Promise<void> {
 }
 
 function renderDataset(value: Dataset): void {
+	const transformed = value.versions.some(
+		(version) => version.id === value.currentVersionId && version.operation.kind === "transform",
+	);
 	ui.dataset.hidden = false;
 	shell.setDatasetAvailable(true);
+	if (projectId) transformController.update({ projectId, dataset: value });
 	ui.datasetHeading.textContent = value.name;
 	ui.datasetSummary.textContent = `${count(value.rowCount)} rows · ${count(value.columnCount)} columns · ${bytes(value.byteSize)}`;
-	ui.sourceLabel.textContent = `${value.format.toUpperCase()} / ORIGINAL`;
+	ui.sourceLabel.textContent = `${value.format.toUpperCase()} / ${transformed ? "TRANSFORMED VERSION" : "ORIGINAL"}`;
 	ui.duplicateNote.hidden = !value.duplicateOf;
 	ui.duplicateNote.textContent = value.duplicateOf
 		? `The same source bytes already exist in this project as ${datasets.find((item) => item.id === value.duplicateOf)?.name ?? value.duplicateOf}. This import has its own dataset and version history; the earlier dataset is unchanged.`
 		: "";
-	ui.previewDescription.textContent =
-		value.format === "csv"
+	ui.previewDescription.textContent = transformed
+		? "Active immutable dataset version. Values are rendered as DuckDB text; the original upload is preserved in Provenance."
+		: value.format === "csv"
 			? "Original CSV strings, including whitespace and leading zeros. Basic types are inferred; source types are unchanged."
 			: "Parquet values rendered as DuckDB text. Exact integer and decimal text is preserved; nested values use DuckDB text notation. Headers show basic and native types.";
 	ui.profileFootnote.textContent =
-		value.format === "csv"
+		value.format === "csv" && !transformed
 			? "Empty means an empty string; whitespace is preserved. Numeric counts and ranges include the finite numeric subset, even in mixed-type columns. A dash means no numeric values."
 			: "Empty counts nulls only, not empty strings. Numeric counts cover finite native numeric values; ranges are shown only for finite floating-point or safe integer values. Decimal ranges are not approximated. A dash means no safely represented range; exact values and native types remain available in Preview.";
+	ui.recompute.textContent = transformed ? "Recompute current profile" : "Recompute ingestion stats";
+	element("recompute-heading").textContent = transformed
+		? "Recompute current version profile"
+		: "Recompute ingestion statistics";
+	element("recompute-description").textContent = transformed
+		? "Profile the active transformed artifact. This does not rebuild from the original upload or change the active version."
+		: "Read the preserved source again with the same parsing rules. This refreshes the elementary full-file statistics, not the optional rich profile.";
 	const header = node("tr");
 	const rowNumber = node("th", "Row", "row-number");
 	rowNumber.scope = "col";
@@ -681,14 +746,14 @@ function renderDataset(value: Dataset): void {
 		],
 		[
 			"Empty values",
-			value.format === "csv"
+			value.format === "csv" && !transformed
 				? "Empty strings only; whitespace and original values are preserved"
 				: "NULL is missing; an empty string remains a separate value",
 		],
 		["Profile method", `Deterministic full-file scan · version ${value.profileVersion}`],
 		[
 			"Type inference",
-			value.format === "csv"
+			value.format === "csv" && !transformed
 				? "All nonempty finite decimal/exponent values: number. All true/false: boolean. No nonempty values: empty. Otherwise: text. Native schema types are shown separately in Preview."
 				: "Basic and native types come from the Parquet schema. Numeric profile ranges exclude values that cannot be represented safely; exact text remains in Preview.",
 		],
@@ -711,10 +776,12 @@ function renderDataset(value: Dataset): void {
 
 function showView(view: View): void {
 	currentView = view;
-	ui.previewPanel.hidden = view === "provenance";
+	ui.previewPanel.hidden = view !== "preview";
 	ui.provenancePanel.hidden = view !== "provenance";
-	ui.previewView.setAttribute("aria-pressed", String(view !== "provenance"));
+	ui.transformPanel.hidden = view !== "transform";
+	ui.previewView.setAttribute("aria-pressed", String(view === "preview"));
 	ui.provenanceView.setAttribute("aria-pressed", String(view === "provenance"));
+	ui.transformView.setAttribute("aria-pressed", String(view === "transform"));
 }
 
 function percent(value: number | null): string {
@@ -903,7 +970,7 @@ function selectColumn(index: number): void {
 		else cell.removeAttribute("data-selected-column");
 	}
 	const context = currentAssistantContext();
-	if (context) assistant.update(context);
+	if (context) conversation.update(context);
 }
 
 function renderColumnDetails(target: HTMLElement, column: ColumnProfile, profile: DatasetProfile): void {
@@ -1111,7 +1178,17 @@ async function loadRichProfile(): Promise<void> {
 }
 
 async function runRichProfile(): Promise<void> {
-	if (!ready || !dataset || !projectId || operationActive() || previewLoading || profileLoading || chartBusy) return;
+	if (
+		!ready ||
+		!dataset ||
+		!projectId ||
+		operationActive() ||
+		previewLoading ||
+		profileLoading ||
+		chartBusy ||
+		transformBusy
+	)
+		return;
 	const source = dataset;
 	const owner = projectId;
 	profileError = "";
@@ -1131,7 +1208,7 @@ async function runRichProfile(): Promise<void> {
 
 async function loadPreview(offset: number, index = pageIndex): Promise<void> {
 	if (!projectId || !datasetId || !dataset) return;
-	if (chartBusy) return;
+	if (chartBusy || transformBusy) return;
 	const owner = projectId;
 	const id = datasetId;
 	const request = ++previewVersion;
@@ -1144,7 +1221,7 @@ async function loadPreview(offset: number, index = pageIndex): Promise<void> {
 	requestedPageIndex = index;
 	ui.previewPanel.setAttribute("aria-busy", "true");
 	ui.previewStatus.hidden = false;
-	ui.previewStatus.textContent = "Loading original rows…";
+	ui.previewStatus.textContent = "Loading active dataset rows…";
 	ui.previewScroll.hidden = currentPreview === null;
 	ui.retryPreview.hidden = true;
 	ui.previousPage.disabled = true;
@@ -1485,7 +1562,7 @@ async function cancelOperation(value: Operation): Promise<void> {
 }
 
 async function importFile(file: File, previous?: Operation): Promise<void> {
-	if (!ready || operationActive() || chartBusy) return;
+	if (!ready || operationActive() || chartBusy || transformBusy) return;
 	const priorJob = previous?.job;
 	if (
 		previous &&
@@ -1570,7 +1647,7 @@ async function importFile(file: File, previous?: Operation): Promise<void> {
 }
 
 async function recompute(): Promise<void> {
-	if (!ready || !dataset || !projectId || operationActive() || chartBusy) return;
+	if (!ready || !dataset || !projectId || operationActive() || chartBusy || transformBusy) return;
 	const source = dataset;
 	const owner = projectId;
 	const value = newOperation("reprofile", source.name, owner, source.byteSize, source.id);
@@ -1765,6 +1842,10 @@ ui.profileView.addEventListener("click", () => {
 });
 ui.provenanceView.addEventListener("click", () => {
 	showView("provenance");
+	shell.selectCenter("data");
+});
+ui.transformView.addEventListener("click", () => {
+	showView("transform");
 	shell.selectCenter("data");
 });
 element("view-quality").addEventListener("click", () => {

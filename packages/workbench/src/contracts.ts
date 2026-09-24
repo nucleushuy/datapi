@@ -1,3 +1,5 @@
+import type { TransformSpec } from "./transform-contracts.ts";
+
 export const MAX_UPLOAD_BYTES = 100_000_000;
 export const PAGE_SIZE = 100;
 export const MAX_PREVIEW_ROWS = 500;
@@ -46,13 +48,26 @@ export interface DatasetColumn {
 	basicType: "empty" | "number" | "boolean" | "text" | "datetime" | "binary" | "nested";
 }
 
+export interface DatasetVersionFacts {
+	rowCount: number;
+	schema: DatasetColumn[];
+	columns: ColumnProfile[];
+	profileVersion: number;
+	profiledAt: string;
+	artifactSha256: string;
+}
+
 export interface DatasetVersion {
 	id: string;
 	kind: "source" | "derived";
 	parentVersionId: string | null;
 	storageLocation: string;
 	createdAt: string;
-	operation: { kind: "upload" | "ingest"; engine: string; version: string };
+	operation:
+		| { kind: "upload" | "ingest"; engine: string; version: string }
+		| { kind: "transform"; engine: string; version: string; spec: TransformSpec; recordId: string };
+	/** Absent only on uploaded source bytes and legacy metadata before initialization upgrades it. */
+	facts?: DatasetVersionFacts;
 }
 
 export interface Dataset {

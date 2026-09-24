@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
-import { lstat, mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
+import { constants, createReadStream } from "node:fs";
+import { copyFile, lstat, mkdir, mkdtemp, open, readFile, rename, rm, stat } from "node:fs/promises";
+import { join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import type { DuckDBAppender, DuckDBConnection, DuckDBResult, DuckDBValue } from "@duckdb/node-api";
 import { DuckDBInstance } from "@duckdb/node-api";
@@ -44,6 +45,8 @@ import {
 	PROFILE_SAMPLE_ROWS,
 } from "./profile-contracts.ts";
 import { ColumnProfiler, finiteNumber } from "./profiler.ts";
+import { TRANSFORM_PREVIEW_ROWS, TRANSFORM_RESULT_BYTES, type TransformImpact } from "./transform-contracts.ts";
+import { createTransformPlan } from "./transform-engine.ts";
 
 const MAX_SCHEMA_BYTES = 1024 * 1024;
 const MAX_SCHEMA_NODES = 16_384;
@@ -724,6 +727,214 @@ async function profileDataset(request: Extract<AnalyticalRequest, { kind: "profi
 	}
 }
 
+async function verifyTransformInput(request: Extract<AnalyticalRequest, { kind: "transform" }>): Promise<void> {
+	const info = await lstat(request.artifactPath);
+	const invalid = "Transformation input does not match its recorded SHA-256 hash, schema or population.";
+	if (
+		!info.isFile() ||
+		info.isSymbolicLink() ||
+		info.size !== request.input.storageBytes ||
+		info.size > MAX_TEMP_BYTES
+	)
+		fail(invalid);
+	try {
+		await lstat(`${request.artifactPath}.wal`);
+		fail(invalid);
+	} catch (error) {
+		if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+	}
+	const hash = createHash("sha256");
+	let bytes = 0;
+	for await (const chunk of createReadStream(request.artifactPath, { highWaterMark: 64 * 1024 })) {
+		bytes += chunk.length;
+		if (bytes > request.input.storageBytes) fail(invalid);
+		hash.update(chunk);
+	}
+	if (bytes !== request.input.storageBytes || hash.digest("hex") !== request.input.datasetVersionHash) fail(invalid);
+}
+
+async function transformDataset(request: Extract<AnalyticalRequest, { kind: "transform" }>): Promise<AnalyticalResult> {
+	await verifyTransformInput(request);
+	try {
+		await lstat(request.outputPath);
+		fail("Transformation output already exists or aliases the input.");
+	} catch (error) {
+		if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+	}
+	await mkdir(request.tempPath, { recursive: true });
+	const stage = await mkdtemp(join(request.tempPath, "transform-"));
+	const output = join(stage, "output.duckdb");
+	let published = false;
+	try {
+		const source = await database(request.artifactPath, { ...request, tempPath: join(stage, "source-spill") }, true);
+		let impact: TransformImpact;
+		try {
+			const invalid = "Transformation input does not match its recorded SHA-256 hash, schema or population.";
+			const shape = await source.connection.run("SELECT * FROM data LIMIT 0");
+			if (
+				shape.columnCount !== request.input.schema.length + 1 ||
+				shape.columnName(0) !== "row_index" ||
+				String(shape.columnType(0)) !== "BIGINT" ||
+				request.input.schema.some(
+					(entry, index) =>
+						entry.index !== index ||
+						shape.columnName(index + 1) !== `c${index}` ||
+						String(shape.columnType(index + 1)) !== "VARCHAR",
+				)
+			)
+				fail(invalid);
+			const population = await source.connection.run(
+				"SELECT count(*), count(DISTINCT row_index), min(row_index), max(row_index) FROM data",
+			);
+			const populationChunk = await population.fetchChunk();
+			if (!populationChunk || populationChunk.rowCount !== 1) fail(invalid);
+			const populationRow = populationChunk.getRowValues(0);
+			if (
+				count(populationRow[0]) !== request.input.rowCount ||
+				count(populationRow[1]) !== request.input.rowCount ||
+				(request.input.rowCount > 0 &&
+					(populationRow[2] !== 0n || populationRow[3] !== BigInt(request.input.rowCount - 1)))
+			)
+				fail(invalid);
+			const before: (string | null)[][] = [];
+			const inputNulls = request.input.schema.map(() => 0);
+			const inputBudget = new DecodedBudget();
+			let beforeBytes = 2;
+			let beforeLimited = false;
+			const inputRows = await source.reader.stream(
+				`SELECT ${request.input.schema.map((_, index) => `c${index}`).join(", ")} FROM data ORDER BY row_index`,
+			);
+			for await (const values of rows(inputRows)) {
+				const row = textRow(values);
+				const bytes = inputBudget.add(row);
+				row.forEach((value, index) => {
+					if (value === null) inputNulls[index]++;
+				});
+				if (before.length < TRANSFORM_PREVIEW_ROWS && !beforeLimited) {
+					if (beforeBytes + bytes > TRANSFORM_RESULT_BYTES / 4) beforeLimited = true;
+					else {
+						before.push(row);
+						beforeBytes += bytes;
+					}
+				}
+			}
+			const plan = await createTransformPlan(source.connection, request.spec, request.input.schema);
+			const target = await database(output, { ...request, tempPath: join(stage, "target-spill") }, false);
+			let rowCount = 0;
+			let affectedRows = 0;
+			const after: (string | null)[][] = [];
+			let afterBytes = 2;
+			let afterLimited = false;
+			const columns = parquetProfiles(plan.schema);
+			const unavailableExtrema = new Set<number>();
+			try {
+				await target.connection.run("BEGIN TRANSACTION");
+				const appender = await createData(target.connection, plan.schema.length);
+				const budget = new DecodedBudget();
+				let pending = 0;
+				const progress = progressReporter();
+				await send({ type: "progress", bytesProcessed: 0, rowCount: 0 });
+				try {
+					const result = await source.connection.stream(plan.sql);
+					for await (const values of rows(result)) {
+						if (
+							values.length !== plan.schema.length + 2 ||
+							values[0] !== BigInt(rowCount) ||
+							typeof values.at(-1) !== "boolean"
+						)
+							fail(invalid);
+						const row = textRow(values.slice(1, -1));
+						const bytes = budget.add(row);
+						pending += bytes;
+						append(appender, row, rowCount++);
+						if (values.at(-1) === true) affectedRows++;
+						addParquetProfile(columns, plan.schema, row, unavailableExtrema);
+						if (after.length < TRANSFORM_PREVIEW_ROWS && !afterLimited) {
+							if (afterBytes + bytes > TRANSFORM_RESULT_BYTES / 4) afterLimited = true;
+							else {
+								after.push(row);
+								afterBytes += bytes;
+							}
+						}
+						if (pending >= FLUSH_BYTES) {
+							appender.flushSync();
+							pending = 0;
+							await checkArtifactSize(output);
+						}
+						await progress(0, rowCount);
+					}
+				} finally {
+					appender.closeSync();
+				}
+				await verifyTransformInput(request);
+				await target.connection.run("COMMIT");
+				await target.connection.run("CHECKPOINT");
+			} finally {
+				target.reader.closeSync();
+				target.connection.closeSync();
+				target.instance.closeSync();
+			}
+			const versionResult = await source.connection.run("SELECT version()");
+			const versionChunk = await versionResult.fetchChunk();
+			if (!versionChunk || versionChunk.rowCount !== 1) fail(GENERIC_ERROR);
+			const beforeByName = new Map(request.input.schema.map((entry, index) => [entry.name, inputNulls[index]]));
+			const afterByName = new Map(plan.schema.map((entry, index) => [entry.name, columns[index].emptyCount]));
+			impact = {
+				inputVersionId: request.input.datasetVersionId,
+				inputHash: request.input.datasetVersionHash,
+				spec: request.spec,
+				engineVersion: text(versionChunk.getRowValues(0)[0]).replace(/^v/u, ""),
+				sql: plan.sql,
+				rowCount,
+				inputRows: request.input.rowCount,
+				affectedRows: plan.removedRows ? request.input.rowCount - rowCount : affectedRows,
+				schema: plan.schema,
+				schemaBefore: request.input.schema,
+				columns,
+				before,
+				after,
+				nullChanges: [...new Set([...beforeByName.keys(), ...afterByName.keys()])].map((name) => ({
+					name,
+					before: beforeByName.get(name) ?? null,
+					after: afterByName.get(name) ?? null,
+				})),
+				warnings: plan.warnings,
+			};
+			if (beforeLimited || afterLimited)
+				impact.warnings.push(
+					"Preview samples were byte-limited; complete input/output counts and null deltas remain exact.",
+				);
+			if (unavailableExtrema.size)
+				impact.warnings.push(
+					"Basic numeric extrema are omitted where binary floating-point would lose exact decimal or large-integer precision.",
+				);
+			if (Buffer.byteLength(JSON.stringify(impact)) > TRANSFORM_RESULT_BYTES)
+				fail("Transformation result exceeds the supported report size.");
+		} finally {
+			source.reader.closeSync();
+			source.connection.closeSync();
+			source.instance.closeSync();
+		}
+		await verifyTransformInput(request);
+		await checkArtifactSize(output);
+		// COPYFILE_EXCL is a no-replace publish even if another process created the destination meanwhile.
+		await copyFile(output, request.outputPath, constants.COPYFILE_EXCL);
+		published = true;
+		const file = await open(request.outputPath, "r+");
+		try {
+			await file.sync();
+		} finally {
+			await file.close();
+		}
+		return { kind: "transform", impact };
+	} catch (error) {
+		if (published) await rm(request.outputPath, { force: true });
+		throw error;
+	} finally {
+		await rm(stage, { recursive: true, force: true });
+	}
+}
+
 async function main(): Promise<void> {
 	const path = process.argv[2];
 	if (!path || (await stat(path)).size > PROFILE_REQUEST_BYTES) fail("Analytical worker request is invalid.");
@@ -735,7 +946,9 @@ async function main(): Promise<void> {
 				? await profileDataset(request)
 				: request.kind === "chart"
 					? await chartDataset(request)
-					: await preview(request);
+					: request.kind === "transform"
+						? await transformDataset(request)
+						: await preview(request);
 	await send({ type: "result", result });
 }
 

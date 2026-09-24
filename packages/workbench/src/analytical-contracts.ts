@@ -1,6 +1,7 @@
 import type { ChartResult, ChartSpec } from "./chart-contracts.ts";
 import type { ColumnProfile, DatasetColumn, DatasetFormat, Preview } from "./contracts.ts";
 import type { DatasetProfile, ProfileInput } from "./profile-contracts.ts";
+import type { TransformImpact, TransformSpec } from "./transform-contracts.ts";
 
 export type AnalyticalRequest =
 	| {
@@ -14,7 +15,15 @@ export type AnalyticalRequest =
 	  }
 	| { kind: "preview"; artifactPath: string; tempPath: string; offset: number; limit: number; total: number }
 	| { kind: "profile"; artifactPath: string; tempPath: string; input: ProfileInput }
-	| { kind: "chart"; artifactPath: string; tempPath: string; input: ProfileInput; spec: ChartSpec };
+	| { kind: "chart"; artifactPath: string; tempPath: string; input: ProfileInput; spec: ChartSpec }
+	| {
+			kind: "transform";
+			artifactPath: string;
+			tempPath: string;
+			outputPath: string;
+			input: ProfileInput;
+			spec: TransformSpec;
+	  };
 
 export type AnalyticalResult =
 	| {
@@ -28,7 +37,8 @@ export type AnalyticalResult =
 	  }
 	| { kind: "preview"; preview: Preview }
 	| { kind: "profile"; profile: DatasetProfile }
-	| { kind: "chart"; chart: ChartResult };
+	| { kind: "chart"; chart: ChartResult }
+	| { kind: "transform"; impact: TransformImpact };
 
 // Curated protocol errors only. Native parser errors can contain source paths and cell contents.
 export const ANALYTICAL_ERROR_MESSAGES = [
@@ -56,6 +66,12 @@ export const ANALYTICAL_ERROR_MESSAGES = [
 	"Profile exceeds the supported report size.",
 	"Chart specification is invalid for this dataset version.",
 	"Chart result exceeds the supported display size; reduce fields or categories.",
+	"Transformation specification is invalid for this dataset version.",
+	"Transformation input does not match its recorded SHA-256 hash, schema or population.",
+	"Transformation cannot convert one or more values under the requested policy.",
+	"Transformation encoding exceeds 128 categories or 512 columns.",
+	"Transformation result exceeds the supported report size.",
+	"Transformation output already exists or aliases the input.",
 ] as const;
 
 export type AnalyticalErrorMessage = (typeof ANALYTICAL_ERROR_MESSAGES)[number];

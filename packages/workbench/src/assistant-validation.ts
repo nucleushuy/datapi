@@ -1,6 +1,7 @@
 import {
 	ASSISTANT_MAX_SUGGESTIONS,
 	ASSISTANT_OUTPUT_BYTES,
+	type AssistantAttachment,
 	type AssistantContext,
 	type AssistantOutput,
 	type AssistantSelection,
@@ -11,8 +12,11 @@ import { defaultChartSpec, parseChartSpec } from "./chart-spec.ts";
 import { chartColumns } from "./chart-validation.ts";
 import type { Dataset } from "./contracts.ts";
 import { WorkbenchError } from "./storage.ts";
+import type { TransformExpression } from "./transform-contracts.ts";
+import { parseTransformSpec } from "./transform-spec.ts";
 
 const SELECTION_KEYS = ["datasetVersionId", "selectedColumns", "filters", "request", "provider", "modelId"];
+const ATTACHMENT_SELECTION_KEYS = [...SELECTION_KEYS, "attachments"];
 const SUGGESTION_KEYS = [
 	"id",
 	"category",
@@ -44,9 +48,28 @@ function text(value: unknown, max: number, nonempty = true): value is string {
 	return typeof value === "string" && value.length <= max && (!nonempty || value.trim().length > 0);
 }
 
+function expressionUsesDeclaredColumns(expression: TransformExpression, columns: number[]): boolean {
+	switch (expression.kind) {
+		case "column":
+			return columns.includes(expression.column);
+		case "literal":
+			return true;
+		case "binary":
+			return (
+				expressionUsesDeclaredColumns(expression.left, columns) &&
+				expressionUsesDeclaredColumns(expression.right, columns)
+			);
+		case "call":
+			return expression.args.every((argument) => expressionUsesDeclaredColumns(argument, columns));
+	}
+}
+
 /** Keep the request and authorized filter values verbatim; only column order is canonicalized. */
 export function parseAssistantSelection(value: unknown, dataset: Dataset): AssistantSelection {
-	requireInput(objectWithKeys(value, SELECTION_KEYS), "Provide only the required assistant selection fields.");
+	requireInput(
+		objectWithKeys(value, SELECTION_KEYS) || objectWithKeys(value, ATTACHMENT_SELECTION_KEYS),
+		"Provide only the required assistant selection fields.",
+	);
 	requireInput(
 		value.datasetVersionId === dataset.currentVersionId,
 		"The dataset version changed. Prepare a new assistant request.",
@@ -80,6 +103,37 @@ export function parseAssistantSelection(value: unknown, dataset: Dataset): Assis
 		throw new WorkbenchError(400, "Assistant filters must be at most 8 valid current-dataset chart filters.");
 	}
 	const selected = new Set(value.selectedColumns);
+	const attachments: AssistantAttachment[] = Array.isArray(value.attachments)
+		? value.attachments.map((attachment) => {
+				requireInput(
+					typeof attachment === "object" &&
+						attachment !== null &&
+						!Array.isArray(attachment) &&
+						Object.keys(attachment).length === 3 &&
+						typeof attachment.name === "string" &&
+						attachment.name.length > 0 &&
+						attachment.name.length <= 256 &&
+						!/[\u0000-\u001f\u007f]/u.test(attachment.name) &&
+						typeof attachment.mediaType === "string" &&
+						attachment.mediaType.length > 0 &&
+						attachment.mediaType.length <= 128 &&
+						typeof attachment.content === "string" &&
+						Buffer.byteLength(attachment.content) <= 8 * 1024,
+					"Attach at most eight text files of 8 KiB each.",
+				);
+				return {
+					name: attachment.name,
+					mediaType: attachment.mediaType,
+					content: attachment.content,
+					byteLength: Buffer.byteLength(attachment.content),
+				};
+			})
+		: [];
+	requireInput(
+		attachments.length <= 8 &&
+			Buffer.byteLength(attachments.map((attachment) => attachment.content).join("")) <= 32 * 1024,
+		"Attach at most eight text files totaling 32 KiB.",
+	);
 	return {
 		datasetVersionId: dataset.currentVersionId,
 		selectedColumns: dataset.schema.filter((column) => selected.has(column.index)).map((column) => column.index),
@@ -87,6 +141,7 @@ export function parseAssistantSelection(value: unknown, dataset: Dataset): Assis
 		request: value.request,
 		provider: value.provider,
 		modelId: value.modelId,
+		attachments,
 	};
 }
 
@@ -183,12 +238,30 @@ export function parseAssistantOutput(source: string, context: AssistantContext):
 					"Assistant chart must be a supported complete specification for the approved version and disclosed affected columns; dual axes and undisclosed automatic fields are not allowed.",
 				);
 			}
+		} else if (objectWithKeys(action, ["kind", "spec"]) && action.kind === "transform") {
+			try {
+				const spec = parseTransformSpec(action.spec, context.schema, context.dataset.versionId);
+				const operation = spec.operation;
+				const declared =
+					"column" in operation
+						? affectedColumns.includes(operation.column)
+						: "columns" in operation
+							? operation.columns.every((column) => affectedColumns.includes(column))
+							: expressionUsesDeclaredColumns(operation.expression, affectedColumns);
+				if (!declared) throw new Error("Transformation fields must be declared as affected columns.");
+				proposedAction = { kind: "transform", spec };
+			} catch {
+				throw new WorkbenchError(
+					422,
+					"Assistant transformation must be a supported complete specification for the approved version and disclosed affected columns, including every nested expression reference. No code or implicit columns are allowed.",
+				);
+			}
 		} else {
 			requireInput(
 				objectWithKeys(action, ["kind", "description"]) &&
 					action.kind === "read-only" &&
 					text(action.description, 1000),
-				"Assistant actions must be validated chart proposals or read-only descriptions of at most 1000 characters.",
+				"Assistant actions must be validated chart or transformation proposals or read-only descriptions of at most 1000 characters.",
 				422,
 			);
 			proposedAction = { kind: "read-only", description: action.description };

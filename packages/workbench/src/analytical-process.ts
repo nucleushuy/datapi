@@ -15,8 +15,11 @@ import {
 	MAX_UPLOAD_BYTES,
 	PROCESSING_TIMEOUT_MS,
 } from "./contracts.ts";
+import { parseAnalyticalRequest } from "./format-validation.ts";
 import { PROFILE_REQUEST_BYTES } from "./profile-contracts.ts";
 import { isDatasetProfile, isProfileInput } from "./profile-validation.ts";
+import { TRANSFORM_PREVIEW_ROWS, TRANSFORM_RESULT_BYTES } from "./transform-contracts.ts";
+import { parseTransformSpec } from "./transform-spec.ts";
 
 const MAX_MESSAGE_BYTES = MAX_PREVIEW_BYTES + 4 * 1024 * 1024;
 const MAX_PROGRESS_BYTES = 64 * 1024;
@@ -76,8 +79,132 @@ function column(value: unknown, index: number): value is DatasetColumn {
 	);
 }
 
+function transformMatches(value: unknown, request: Extract<AnalyticalRequest, { kind: "transform" }>): boolean {
+	if (
+		!record(value) ||
+		!keys(value, [
+			"inputVersionId",
+			"inputHash",
+			"spec",
+			"engineVersion",
+			"sql",
+			"affectedRows",
+			"inputRows",
+			"nullChanges",
+			"schemaBefore",
+			"before",
+			"after",
+			"warnings",
+			"rowCount",
+			"schema",
+			"columns",
+		])
+	)
+		return false;
+	if (
+		Buffer.byteLength(JSON.stringify(value)) > TRANSFORM_RESULT_BYTES ||
+		value.inputVersionId !== request.input.datasetVersionId ||
+		value.inputHash !== request.input.datasetVersionHash ||
+		value.inputRows !== request.input.rowCount ||
+		!count(value.rowCount) ||
+		value.rowCount > request.input.rowCount ||
+		!count(value.affectedRows) ||
+		value.affectedRows > request.input.rowCount ||
+		typeof value.engineVersion !== "string" ||
+		!/^[a-zA-Z0-9.+_-]{1,80}$/u.test(value.engineVersion) ||
+		typeof value.sql !== "string" ||
+		!value.sql.startsWith("SELECT row_number() OVER (ORDER BY source_row_index) - 1 AS row_index, ") ||
+		!Array.isArray(value.warnings) ||
+		value.warnings.length > 20 ||
+		!value.warnings.every((entry: unknown) => typeof entry === "string") ||
+		JSON.stringify(value.schemaBefore) !== JSON.stringify(request.input.schema)
+	)
+		return false;
+	try {
+		if (
+			JSON.stringify(parseTransformSpec(value.spec, request.input.schema, request.input.datasetVersionId)) !==
+			JSON.stringify(parseTransformSpec(request.spec, request.input.schema, request.input.datasetVersionId))
+		)
+			return false;
+	} catch {
+		return false;
+	}
+	if (
+		!Array.isArray(value.schema) ||
+		value.schema.length < 1 ||
+		value.schema.length > MAX_COLUMNS ||
+		!value.schema.every((entry: unknown, index: number) => column(entry, index)) ||
+		!Array.isArray(value.columns) ||
+		value.columns.length !== value.schema.length
+	)
+		return false;
+	const schema = value.schema as DatasetColumn[];
+	const columns: unknown[] = value.columns;
+	const rowCount = value.rowCount;
+	if (
+		new Set(schema.map((entry) => entry.name)).size !== schema.length ||
+		!columns.every((entry, index) => profile(entry, index, rowCount) && entry.name === schema[index].name)
+	)
+		return false;
+	const op = request.spec.operation;
+	const removes = op.kind === "filter" || op.kind === "deduplicate" || (op.kind === "missing" && op.method === "drop");
+	if (removes ? value.affectedRows !== request.input.rowCount - rowCount : rowCount !== request.input.rowCount)
+		return false;
+	const expected = request.input.schema
+		.filter((entry) => op.kind !== "drop" || !op.columns.includes(entry.index))
+		.map((entry) => ({ ...entry, name: op.kind === "rename" && op.column === entry.index ? op.name : entry.name }));
+	const appended = op.kind === "derive" || op.kind === "datetime" || op.kind === "scale" || op.kind === "encode";
+	if (
+		(!appended && schema.length !== expected.length) ||
+		(appended && schema.length <= expected.length) ||
+		expected.some((entry, index) => schema[index]?.name !== entry.name)
+	)
+		return false;
+	if (appended) {
+		const additions = schema.slice(expected.length);
+		if (op.kind === "encode" && op.method === "one-hot") {
+			if (
+				additions.length > 128 ||
+				(op.categories.length > 0 && additions.length !== op.categories.length) ||
+				additions.some((entry, index) => entry.name !== `${op.name}_${index}`)
+			)
+				return false;
+		} else if (additions.length !== 1 || additions[0].name !== op.name) return false;
+		if (value.affectedRows !== request.input.rowCount) return false;
+	}
+	const samples = (sample: unknown, width: number, available: number): boolean =>
+		Array.isArray(sample) &&
+		sample.length <= Math.min(TRANSFORM_PREVIEW_ROWS, available) &&
+		sample.every(
+			(row: unknown) =>
+				Array.isArray(row) &&
+				row.length === width &&
+				row.every((cell: unknown) => cell === null || typeof cell === "string"),
+		);
+	if (
+		!samples(value.before, request.input.schema.length, request.input.rowCount) ||
+		!samples(value.after, schema.length, rowCount)
+	)
+		return false;
+	const names = [
+		...new Set([...request.input.schema.map((entry) => entry.name), ...schema.map((entry) => entry.name)]),
+	];
+	if (!Array.isArray(value.nullChanges) || value.nullChanges.length !== names.length) return false;
+	return value.nullChanges.every((entry: unknown, index: number) => {
+		if (!record(entry) || !keys(entry, ["name", "before", "after"]) || entry.name !== names[index]) return false;
+		const beforeIndex = request.input.schema.findIndex((candidate) => candidate.name === entry.name);
+		const afterIndex = schema.findIndex((candidate) => candidate.name === entry.name);
+		const afterProfile = columns[afterIndex];
+		return (
+			(beforeIndex < 0 ? entry.before === null : count(entry.before) && entry.before <= request.input.rowCount) &&
+			(afterIndex < 0 ? entry.after === null : record(afterProfile) && entry.after === afterProfile.emptyCount)
+		);
+	});
+}
+
 function resultMatches(value: unknown, request: AnalyticalRequest): value is AnalyticalResult {
 	if (!record(value) || value.kind !== request.kind) return false;
+	if (request.kind === "transform") return keys(value, ["kind", "impact"]) && transformMatches(value.impact, request);
 	if (request.kind === "chart")
 		return keys(value, ["kind", "chart"]) && isChartResult(value.chart, request.input, request.spec);
 	if (request.kind === "profile")
@@ -130,6 +257,14 @@ function resultMatches(value: unknown, request: AnalyticalRequest): value is Ana
 }
 
 function requestValid(request: AnalyticalRequest): boolean {
+	if (request.kind === "transform") {
+		try {
+			parseAnalyticalRequest(request);
+			return true;
+		} catch {
+			return false;
+		}
+	}
 	const paths = [request.artifactPath, request.tempPath];
 	if (request.kind === "ingest") paths.push(request.sourcePath);
 	if (!paths.every((path) => typeof path === "string" && isAbsolute(path) && !path.includes("\0"))) return false;

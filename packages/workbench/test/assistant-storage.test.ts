@@ -9,6 +9,8 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { AssistantRun, AssistantSuggestion } from "../src/assistant-contracts.ts";
 import { defaultChartSpec } from "../src/chart-spec.ts";
 import type { Dataset, ImportJob, Project } from "../src/contracts.ts";
+import type { ConversationDriver } from "../src/conversation-contracts.ts";
+import { ConversationService } from "../src/conversation-service.ts";
 import { MetadataStore } from "../src/metadata.ts";
 import { WorkbenchError, WorkbenchStore } from "../src/storage.ts";
 
@@ -196,7 +198,7 @@ test(
 		assert.deepEqual(await readFile(artifactPath), artifact);
 		const database = new DatabaseSync(join(state.root, "workbench.sqlite"));
 		try {
-			assert.equal(database.prepare("PRAGMA user_version").get()?.user_version, 4);
+			assert.equal(database.prepare("PRAGMA user_version").get()?.user_version, 7);
 		} finally {
 			database.close();
 		}
@@ -362,5 +364,89 @@ test(
 		await assert.rejects(state.store.revertAssistantChart(applied, "chart-1"), status(409));
 		assert.deepEqual(await state.store.listCharts(project.id, dataset.id), [replacement]);
 		assert.deepEqual(await state.store.assistantRun(project.id, dataset.id, run.id), applied);
+	},
+);
+
+test("Pi conversations persist a frozen scope and relay streamed deltas", { timeout: 120_000 }, async (context) => {
+	const { state, project, dataset } = await fixture(context);
+	const profiling = await state.store.profile(project.id, dataset.id);
+	assert.equal((await waitJob(state.store, project.id, profiling.id)).state, "completed");
+	const driver: ConversationDriver = {
+		async chat(input, onEvent) {
+			onEvent({ type: "text", delta: "Pi " });
+			onEvent({ type: "text", delta: "streams." });
+			return {
+				sessionFile: input.sessionFile ?? "session.jsonl",
+				text: "Pi streams.",
+				usage: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 3 },
+			};
+		},
+		async setCredential() {},
+		async deleteCredential() {},
+		async close() {},
+	};
+	const service = new ConversationService(state.store, driver);
+	context.after(() => service.close());
+	const conversation = await service.create(project.id, dataset.id, {
+		datasetVersionId: dataset.currentVersionId,
+		selectedColumns: [0, 1],
+		filters: [],
+		request: "Compare the values",
+		provider: "test-provider",
+		modelId: "test-model",
+	});
+	const events: string[] = [];
+	const completed = await service.send(
+		project.id,
+		dataset.id,
+		conversation.id,
+		{ message: "What changed?" },
+		(event) => {
+			if (event.type === "text") events.push(event.delta);
+		},
+	);
+	assert.deepEqual(events, ["Pi ", "streams."]);
+	assert.equal(completed.messages.at(-1)?.text, "Pi streams.");
+	assert.equal(completed.sessionFile, "session.jsonl");
+});
+
+test(
+	"Pi conversation cancellation stops the live turn and leaves the transcript reusable",
+	{ timeout: 120_000 },
+	async (context) => {
+		const { state, project, dataset } = await fixture(context);
+		const profiling = await state.store.profile(project.id, dataset.id);
+		assert.equal((await waitJob(state.store, project.id, profiling.id)).state, "completed");
+		let started!: () => void;
+		const streaming = new Promise<void>((resolve) => {
+			started = resolve;
+		});
+		const driver: ConversationDriver = {
+			async chat(_input, _onEvent, signal) {
+				started();
+				return await new Promise((_, reject) => {
+					signal.addEventListener("abort", () => reject(new Error("cancelled")), { once: true });
+				});
+			},
+			async setCredential() {},
+			async deleteCredential() {},
+			async close() {},
+		};
+		const service = new ConversationService(state.store, driver);
+		context.after(() => service.close());
+		const conversation = await service.create(project.id, dataset.id, {
+			datasetVersionId: dataset.currentVersionId,
+			selectedColumns: [0, 1],
+			filters: [],
+			request: "Compare the values",
+			provider: "test-provider",
+			modelId: "test-model",
+		});
+		const pending = service.send(project.id, dataset.id, conversation.id, { message: "Start streaming" });
+		await streaming;
+		await service.cancel(project.id, dataset.id, conversation.id);
+		const cancelled = await pending;
+		assert.equal(cancelled.state, "failed");
+		assert.equal(cancelled.messages.at(-1)?.state, "cancelled");
 	},
 );

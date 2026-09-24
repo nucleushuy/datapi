@@ -12,7 +12,7 @@
 		<a class="skip-link" href="#workspace">Skip to workspace</a>
 		<header class="app-header">
 			<a class="brand" href="/" aria-label="Data Pi home"><span class="brand-mark" aria-hidden="true">dp</span>data pi<span class="brand-caption">/ workbench</span></a>
-			<div class="privacy" role="status"><span class="status-dot" aria-hidden="true"></span><strong id="assistant-privacy-state">Approval required</strong><span id="assistant-privacy-detail" class="privacy-detail">AI sharing is opt-in; review the exact payload first</span></div>
+			<div class="privacy" role="status"><span class="status-dot" aria-hidden="true"></span><strong id="assistant-privacy-state">Private by default</strong><span id="assistant-privacy-detail" class="privacy-detail">Chat shares only the selected read-only dataset context</span></div>
 			<nav class="header-actions" aria-label="Workbench controls">
 				<button id="command-trigger" class="button command-trigger" type="button" aria-haspopup="dialog" aria-controls="command-dialog">Commands</button>
 				<button id="theme-toggle" class="button button-quiet" type="button">Light theme</button>
@@ -91,7 +91,7 @@
 				<section id="dataset" class="dataset" aria-labelledby="dataset-heading" hidden>
 					<div class="dataset-heading"><div class="heading-copy"><p class="eyebrow">Source dataset</p><h2 id="dataset-heading"></h2><p id="dataset-summary" class="dataset-summary"></p></div><span id="source-label" class="source-label"></span></div>
 					<p id="duplicate-note" class="storage-note" hidden></p>
-					<div class="view-switcher" role="group" aria-label="Dataset view"><button id="view-preview" class="view-button" type="button" aria-pressed="true" aria-controls="preview-panel">Preview</button><button id="view-profile" class="view-button" type="button" aria-controls="center-panel-statistics">Statistics</button><button id="view-quality" class="view-button" type="button" aria-controls="quality-panel">Data Quality</button><button id="view-provenance" class="view-button" type="button" aria-pressed="false" aria-controls="provenance-panel">Provenance</button></div>
+					<div class="view-switcher" role="group" aria-label="Dataset view"><button id="view-preview" class="view-button" type="button" aria-pressed="true" aria-controls="preview-panel">Preview</button><button id="view-transform" class="view-button" type="button" aria-pressed="false" aria-controls="transform-panel">Transform</button><button id="view-profile" class="view-button" type="button" aria-controls="center-panel-statistics">Statistics</button><button id="view-quality" class="view-button" type="button" aria-controls="quality-panel">Data Quality</button><button id="view-provenance" class="view-button" type="button" aria-pressed="false" aria-controls="provenance-panel">Provenance</button></div>
 					<section id="preview-panel" aria-label="Dataset preview">
 						<div class="preview-profile-layout">
 						<aside id="column-inspector" class="column-inspector" aria-label="Column profile beside data preview"><label for="column-search">Search columns</label><input id="column-search" type="search" autocomplete="off" spellcheck="false" placeholder="Name, type or semantic candidate" aria-controls="column-list" /><p id="column-search-status" class="muted" role="status"></p><ul id="column-list" class="column-list" aria-label="Dataset columns"></ul><section id="column-details" class="column-details" aria-label="Selected column details" tabindex="-1"></section></aside>
@@ -113,8 +113,9 @@
 					<section id="provenance-panel" class="provenance-panel" aria-label="Dataset provenance" hidden>
 						<div class="panel-intro"><p>A reproducible record of this import.</p></div>
 						<dl id="provenance" class="provenance"></dl>
-						<div class="recompute"><div><h3>Recompute ingestion statistics</h3><p class="muted">Read the preserved source again with the same parsing rules. This refreshes the elementary full-file statistics, not the optional rich profile.</p></div><button id="recompute-button" class="button" type="button">Recompute ingestion stats</button></div>
+						<div class="recompute"><div><h3 id="recompute-heading">Recompute ingestion statistics</h3><p id="recompute-description" class="muted">Read the preserved source again with the same parsing rules. This refreshes the elementary full-file statistics, not the optional rich profile.</p></div><button id="recompute-button" class="button" type="button">Recompute ingestion stats</button></div>
 					</section>
+					<section id="transform-panel" aria-label="Dataset transformations" hidden></section>
 				</section>
 				</div>
 				<section id="center-panel-code" class="workspace-panel" role="tabpanel" aria-labelledby="center-tab-code" tabindex="0" hidden>
@@ -141,18 +142,14 @@
 			<aside id="inspector-panel" class="inspector" aria-labelledby="inspector-heading">
 				<div class="inspector-heading"><div><p class="eyebrow">Alongside your work</p><h2 id="inspector-heading">Context</h2></div><span class="connection-label">Local workspace</span></div>
 				<nav class="shell-tabs inspector-tabs" role="tablist" aria-label="Inspector views">
-					<button id="right-tab-assistant" class="shell-tab" type="button" role="tab" data-right-tab="assistant" aria-selected="true" aria-controls="right-panel-assistant" tabindex="0">Assistant</button>
-					<button id="right-tab-suggestions" class="shell-tab" type="button" role="tab" data-right-tab="suggestions" aria-selected="false" aria-controls="right-panel-suggestions" tabindex="-1">Suggestions</button>
+					<button id="right-tab-assistant" class="shell-tab" type="button" role="tab" data-right-tab="assistant" aria-selected="true" aria-controls="right-panel-assistant" tabindex="0">Chat</button>
 					<button id="right-tab-activity" class="shell-tab" type="button" role="tab" data-right-tab="activity" aria-selected="false" aria-controls="right-panel-activity" tabindex="-1">Activity</button>
 				</nav>
 				<section id="right-panel-assistant" class="inspector-content" role="tabpanel" aria-labelledby="right-tab-assistant" tabindex="0">
-					<div id="assistant-workspace"></div>
-				</section>
-				<section id="right-panel-suggestions" class="inspector-content" role="tabpanel" aria-labelledby="right-tab-suggestions" tabindex="0" hidden>
-					<div id="assistant-suggestions"></div>
+					<div id="chat-workspace"></div>
 				</section>
 				<section id="right-panel-activity" class="inspector-content" role="tabpanel" aria-labelledby="right-tab-activity" tabindex="0" hidden>
-					<p class="capability-label">Local operations and approved AI runs</p><h3>Keep track of the work.</h3><p>Current import and recompute progress appears above the workspace tabs. Assistant run history, token usage and cancellation are available in Assistant.</p><p>For a completed import, open Provenance in Data to inspect the preserved source and parsing details.</p>
+					<p class="capability-label">Local operations</p><h3>Keep track of the work.</h3><p>Current import and recompute progress appears above the workspace tabs. For a completed import, open Provenance in Data to inspect the preserved source and parsing details.</p>
 				</section>
 				<div class="inspector-footer"><span class="eyebrow">BUILT TO BE INSPECTED</span><p>Original values stay original. Column profiles describe the data; they do not change it.</p></div>
 			</aside>

@@ -12,6 +12,7 @@ import {
 	MAX_UPLOAD_BYTES,
 } from "./contracts.ts";
 import { isProfileInput } from "./profile-validation.ts";
+import { parseTransformSpec } from "./transform-spec.ts";
 
 export class FormatValidationError extends Error {
 	constructor(message: AnalyticalErrorMessage) {
@@ -50,6 +51,27 @@ export function parseAnalyticalRequest(value: unknown): AnalyticalRequest {
 	if (!value || typeof value !== "object") fail("Analytical worker request is invalid.");
 	const request = value as Record<string, unknown>;
 	if (!localPath(request.artifactPath) || !localPath(request.tempPath)) fail("Analytical worker request is invalid.");
+	if (request.kind === "transform") {
+		if (Object.keys(request).length !== 6 || !localPath(request.outputPath) || !isProfileInput(request.input))
+			fail("Analytical worker request is invalid.");
+		const artifactPath = resolve(request.artifactPath);
+		const outputPath = resolve(request.outputPath);
+		const tempPath = resolve(request.tempPath);
+		if (new Set([artifactPath, outputPath, tempPath].map((path) => path.toLowerCase())).size !== 3)
+			fail("Transformation output already exists or aliases the input.");
+		try {
+			return {
+				kind: "transform",
+				artifactPath,
+				outputPath,
+				tempPath,
+				input: request.input,
+				spec: parseTransformSpec(request.spec, request.input.schema, request.input.datasetVersionId),
+			};
+		} catch {
+			fail("Transformation specification is invalid for this dataset version.");
+		}
+	}
 	if (request.kind === "chart") {
 		if (!isProfileInput(request.input)) fail("Analytical worker request is invalid.");
 		try {

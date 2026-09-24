@@ -13,6 +13,7 @@ import { defaultChartSpec } from "../src/chart-spec.ts";
 import type { Dataset, DatasetColumn, Project } from "../src/contracts.ts";
 import { computeDatasetProfile } from "../src/dataset-profiler.ts";
 import { WorkbenchError } from "../src/storage.ts";
+import type { TransformOperation, TransformSpec } from "../src/transform-contracts.ts";
 
 const versionId = "current-version";
 const privatePath = "C:/private/credential-directory/source.csv";
@@ -443,6 +444,157 @@ test("output rejects cross-version chart specs, undeclared fields, dual axes and
 	])
 		rejectsOutput([suggestion({ proposedAction: { kind: "chart", spec } })], /supported complete specification/u);
 	rejectsOutput([suggestion({ affectedColumns: [0, 1] })], /supported complete specification/u);
+});
+
+test("all supported transformations remain unapplied proposals with exact disclosed versions and evidence", () => {
+	const operations: TransformOperation[] = [
+		{ kind: "rename", column: 0, name: "failure_indicator" },
+		{ kind: "cast", column: 0, type: "integer", invalid: "error" },
+		{ kind: "drop", columns: [2] },
+		{ kind: "filter", column: 0, operator: "gte", comparison: "number", value: "0" },
+		{ kind: "missing", columns: [0], method: "mean", missing: "both", value: null },
+		{ kind: "deduplicate", columns: [0, 1] },
+		{
+			kind: "map",
+			column: 0,
+			entries: [
+				{ from: "0", to: "no" },
+				{ from: "1", to: "yes" },
+			],
+			unmatched: "keep",
+		},
+		{ kind: "datetime", column: 1, component: "year", name: "failure_year" },
+		{ kind: "scale", column: 0, method: "standard", name: "scaled_failure" },
+		{ kind: "encode", column: 2, method: "one-hot", categories: [], name: "machine" },
+		{
+			kind: "derive",
+			name: "adjusted_failure",
+			expression: {
+				kind: "binary",
+				operator: "add",
+				left: { kind: "column", column: 0 },
+				right: {
+					kind: "call",
+					function: "coalesce",
+					args: [
+						{ kind: "column", column: 2 },
+						{ kind: "literal", value: "unknown" },
+					],
+				},
+			},
+		},
+	];
+	for (const operation of operations) {
+		const spec: TransformSpec = { version: 1, datasetVersionId: versionId, operation };
+		const parsed = parseAssistantOutput(
+			output([suggestion({ category: "transformation", proposedAction: { kind: "transform", spec } })]),
+			contextFor(),
+		).suggestions[0];
+		assert.deepEqual(parsed.proposedAction, { kind: "transform", spec });
+		assert.equal(parsed.status, "proposed");
+		assert.equal(parsed.chartId, null);
+		assert.equal(parsed.basis, "evidence-linked");
+		assert.deepEqual(parsed.evidenceRefs, ["column.0.numeric.min", "column.0.numeric.max"]);
+	}
+	const payload = buildAssistantPayload(contextFor(), "Suggest cleaning operations");
+	for (const operation of operations) assert.ok(payload.system.includes(`"const":"${operation.kind}"`));
+	assert.match(payload.system, /every nested|deeply nested/u);
+	assert.match(payload.system, /separate explicit approval/u);
+	assert.match(payload.system, /generatedCode stays separate inspect-only/u);
+});
+
+test("transform validation rejects hidden and undeclared references at every expression depth", () => {
+	const spec = (operation: unknown) => ({ version: 1, datasetVersionId: versionId, operation });
+	for (const operation of [
+		{ kind: "rename", column: 3, name: "leaked" },
+		{ kind: "drop", columns: [0, 3] },
+		{ kind: "deduplicate", columns: [] },
+		{ kind: "deduplicate", columns: [0, 3] },
+		{ kind: "missing", columns: [3], method: "drop", missing: "both", value: null },
+		{
+			kind: "derive",
+			name: "leaked",
+			expression: {
+				kind: "call",
+				function: "coalesce",
+				args: [
+					{ kind: "literal", value: 0 },
+					{
+						kind: "binary",
+						operator: "add",
+						left: { kind: "literal", value: 1 },
+						right: { kind: "column", column: 3 },
+					},
+				],
+			},
+		},
+	])
+		rejectsOutput(
+			[suggestion({ proposedAction: { kind: "transform", spec: spec(operation) } })],
+			/disclosed affected columns/u,
+		);
+	const nested = spec({
+		kind: "derive",
+		name: "new_value",
+		expression: { kind: "call", function: "trim", args: [{ kind: "column", column: 2 }] },
+	});
+	rejectsOutput(
+		[suggestion({ affectedColumns: [0, 1], proposedAction: { kind: "transform", spec: nested } })],
+		/disclosed affected columns/u,
+	);
+	const disclosedSubset = { ...contextFor(), schema: [schema[2]], selectedColumns: [2] };
+	const action = { kind: "transform", spec: spec({ kind: "rename", column: 2, name: "machine" }) };
+	const parsed = parseAssistantOutput(
+		output([suggestion({ affectedColumns: [2], evidenceRefs: [], proposedAction: action })]),
+		disclosedSubset,
+	).suggestions[0];
+	assert.deepEqual(parsed.proposedAction, action);
+	assert.equal(parsed.basis, "hypothesis");
+	assert.equal(parsed.confidence, 0.5);
+});
+
+test("transform proposals reject hostile code, unknown options, stale versions and fabricated evidence", () => {
+	const spec = { version: 1, datasetVersionId: versionId, operation: { kind: "rename", column: 0, name: "renamed" } };
+	const code = "require('node:child_process').execSync('MUST_NOT_RUN')";
+	for (const bad of [
+		{ ...spec, version: 2 },
+		{ ...spec, datasetVersionId: "old" },
+		{ ...spec, approved: true },
+		{ ...spec, sql: code },
+		{ ...spec, operation: { ...spec.operation, code } },
+		{ ...spec, operation: { kind: "execute", code } },
+		{ ...spec, operation: { kind: "derive", name: "injected", expression: code } },
+		{
+			...spec,
+			operation: {
+				kind: "derive",
+				name: "injected",
+				expression: { kind: "call", function: "eval", args: [{ kind: "literal", value: code }] },
+			},
+		},
+		{
+			...spec,
+			operation: { kind: "derive", name: "injected", expression: { kind: "column", column: 0, sql: code } },
+		},
+	])
+		rejectsOutput(
+			[suggestion({ proposedAction: { kind: "transform", spec: bad } })],
+			/supported complete specification/u,
+		);
+	const action = { kind: "transform", spec };
+	rejectsOutput(
+		[suggestion({ proposedAction: { ...action, approved: true } })],
+		/validated chart or transformation proposals/u,
+	);
+	rejectsOutput([suggestion({ proposedAction: action, evidenceRefs: ["computed.impact"] })], /exact records/u);
+	rejectsOutput([suggestion({ proposedAction: action, affectedColumns: [2] })], /affected columns/u);
+	const parsed = parseAssistantOutput(
+		output([suggestion({ proposedAction: action, generatedCode: code })]),
+		contextFor(),
+	).suggestions[0];
+	assert.equal(parsed.generatedCode, code);
+	assert.equal(parsed.status, "proposed");
+	assert.deepEqual(parsed.proposedAction, action);
 });
 
 test("generated code is preserved solely as bounded display text, never interpreted as an action", () => {

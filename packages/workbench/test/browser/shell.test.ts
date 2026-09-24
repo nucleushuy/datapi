@@ -37,6 +37,8 @@ function setup(t: TestContext, saved?: string, width = 1440, options?: ShellOpti
 
 test("workspace and inspector tabs use independent roving focus and persist selections", (t) => {
 	const { element, document, key, browser } = setup(t);
+	assert.equal(document.getElementById("center-tab-chat"), null);
+	assert.ok(document.getElementById("chat-workspace"));
 	element("center-tab-data").focus();
 	key("center-tab-data", "ArrowRight");
 	assert.equal(document.activeElement?.id, "center-tab-code");
@@ -60,19 +62,38 @@ test("workspace and inspector tabs use independent roving focus and persist sele
 test("stored themes, tabs and panel widths survive a fresh controller", (t) => {
 	const first = setup(t);
 	first.shell.selectCenter("statistics");
-	first.shell.selectRight("suggestions");
+	first.shell.selectRight("activity");
 	first.element("theme-toggle").click();
 	first.key("left-splitter", "End");
 	const saved = first.browser.localStorage.getItem(SHELL_STORAGE_KEY);
 	assert.ok(saved);
 	const second = setup(t, saved);
 	assert.equal(second.element("center-panel-statistics").hidden, false);
-	assert.equal(second.element("right-panel-suggestions").hidden, false);
+	assert.equal(second.element("right-panel-activity").hidden, false);
 	assert.equal(second.document.documentElement.dataset.theme, first.document.documentElement.dataset.theme);
 	assert.equal(
 		second.element("left-splitter").getAttribute("aria-valuenow"),
 		first.element("left-splitter").getAttribute("aria-valuenow"),
 	);
+});
+
+test("version one layouts retain Data and preserve panel widths and theme", (t) => {
+	const { element, document } = setup(
+		t,
+		JSON.stringify({
+			version: 1,
+			leftWidth: 320,
+			rightWidth: 360,
+			centerTab: "data",
+			rightTab: "activity",
+			theme: "light",
+		}),
+	);
+	assert.equal(element("center-panel-data").hidden, false);
+	assert.equal(element("left-splitter").getAttribute("aria-valuenow"), "320");
+	assert.equal(element("right-splitter").getAttribute("aria-valuenow"), "360");
+	assert.equal(element("right-panel-activity").hidden, false);
+	assert.equal(document.documentElement.dataset.theme, "light");
 });
 
 test("keyboard resize clamps both panels and responsive layout retains desktop preference", (t) => {
@@ -135,7 +156,7 @@ test("corrupt and out-of-range preferences cannot break the shell", (t) => {
 		"{broken",
 		JSON.stringify({ version: 500, centerTab: "unknown" }),
 		JSON.stringify({
-			version: 1,
+			version: 2,
 			leftWidth: -9999,
 			rightWidth: 99999,
 			theme: "injected",
