@@ -12,6 +12,30 @@
 - When the user asks a question, answer it first before making edits or running implementation commands.
 - When responding to user feedback or an analysis, explicitly say whether you agree or disagree before saying what you changed.
 
+## Data Science Workbench
+
+This repository is being developed into a web-based data-science workbench built around Pi.
+
+The product direction is a keyboard-first, OpenCode-inspired agent workbench curated for data scientists, not a literal OpenCode clone or a generic analytics dashboard. Treat datasets, columns, transformations, charts, evidence, lineage, and runs as first-class interface objects. Favor persistent project sessions, streaming agent and tool activity, inspectable operations, contextual data attachments, and explicit privacy and approval states.
+
+### Operating Rules
+
+- Inspect the repository before proposing or changing architecture. Reuse its npm workspace setup, conventions, libraries, and build system unless a change is justified.
+- Never invent file paths, APIs, database tables, or commands. Verify them in the repository.
+- Before implementation, state the files expected to change and the acceptance criteria.
+- Make one bounded feature change at a time. Preserve existing Pi behavior and public APIs unless the task explicitly requires a breaking change.
+- Prefer Pi's supported SDK or RPC boundary over coupling the web UI to internal implementation details.
+- Keep data operations reproducible. Every transformation or chart must have inspectable generated code or a structured operation record.
+- Separate observed dataset facts from AI inferences. Recommendations must include evidence, affected columns, confidence, and a proposed action.
+- Treat uploaded files, column names, cell values, model output, and generated code as untrusted input.
+- Never execute user-generated Python or shell code in the web server process. Use an isolated worker with CPU, memory, time, filesystem, and network limits.
+- Do not send dataset rows to an LLM by default. Prefer schema, statistics, and redacted samples, and clearly surface when data will leave the machine.
+- Never log API keys, tokens, raw datasets, or sensitive cell values.
+- Add or update tests for each behavior. Run the narrowest relevant tests using the commands below, then run `npm run check` after code changes. Documentation-only changes do not require tests or checks.
+- Do not hide errors behind mock data or silent fallbacks. Display useful, safe error messages.
+- Maintain keyboard accessibility, responsive behavior, loading states, empty states, and error states.
+- At the end of each task, report files changed, decisions made, commands run, test results, known limitations, and the next recommended task.
+
 ## Code Quality
 
 - Read files in full before wide-ranging changes, before editing files you have not fully inspected, and when asked to investigate or audit. Do not rely on search snippets for broad changes.

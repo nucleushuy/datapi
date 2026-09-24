@@ -1,0 +1,24 @@
+{
+	"name": "@earendil-works/pi-workbench",
+	"version": "0.84.4",
+	"private": true,
+	"type": "module",
+	"description": "Local data-science workbench",
+	"engines": { "node": ">=22.19.0" },
+	"scripts": {
+		"dev": "node src/cli.ts",
+		"test": "node --test test/*.test.ts test/browser/*.test.ts",
+		"typecheck": "tsgo --noEmit -p tsconfig.json"
+	},
+	"dependencies": {
+		"@duckdb/node-api": "1.5.5-r.5",
+		"@earendil-works/pi-ai": "^0.84.4",
+		"@earendil-works/pi-coding-agent": "^0.84.4",
+		"csv-parse": "6.1.0",
+		"tsx": "4.22.1"
+	},
+	"devDependencies": {
+		"esbuild": "0.28.1"
+		,"happy-dom": "20.8.4"
+	}
+}
