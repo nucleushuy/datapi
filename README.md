@@ -25,6 +25,15 @@ The goal is a keyboard-first workbench for data scientists—not a generic dashb
 Transformations include rename/cast/drop, row filters, missing-value handling, deduplication, category mapping, datetime extraction, scaling, encoding, and derived columns from validated expressions. They are application-defined operations, not arbitrary SQL or model-generated code execution.
 
 ## Quick start
+| Package | Description |
+|---------|-------------|
+| **[@earendil-works/chord](packages/chord)** | Standalone application-composition runtime for services, replicated state, RPC, and plugins |
+| **[@earendil-works/pi-telemetry](packages/telemetry)** | Vendor-neutral telemetry contracts, reference adapter, conformance tests, and typed schemas |
+| **[@earendil-works/pi-ai](packages/ai)** | Unified multi-provider LLM API (OpenAI, Anthropic, Google, etc.) |
+| **[@earendil-works/pi-durable](packages/durable)** | Durable conversation, task, and document runtime |
+| **[@earendil-works/pi-agent-core](packages/agent)** | Agent runtime with tool calling and state management |
+| **[@earendil-works/pi-coding-agent](packages/coding-agent)** | Interactive coding agent CLI |
+| **[@earendil-works/pi-tui](packages/tui)** | Terminal UI library with differential rendering |
 
 Requirements:
 
@@ -117,6 +126,7 @@ Immutable dataset versions        Saved Pi session history
 ```
 
 The web application lives in [`packages/workbench`](packages/workbench). It reuses the repository's npm workspaces, TypeScript tooling, esbuild, and Pi SDK rather than adding a separate agent engine or frontend framework. SQLite application records and Pi conversation history have distinct roles. The SDK reopens the saved Pi session for subsequent turns; a worker is not kept alive indefinitely.
+The archive includes release model data and native prebuilds. `--offline-model-data` uses that model data without refreshing provider catalogs. The script installs dependencies and builds the executable with its runtime assets; pass `--skip-install` if dependencies are already provided.
 
 ## Development and verification
 
