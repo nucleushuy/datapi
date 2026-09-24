@@ -79,7 +79,7 @@ The shell has project/dataset navigation, Data/Code/Visualize/Statistics/Models 
 
 Use the Commands button or Ctrl+K (Command+K on macOS) for navigation, theme, and layout actions. Tab groups support Left/Right and Home/End. Escape closes the command palette and restores focus. Panel widths, selected tabs, and theme persist in browser storage for the same server address. Reset layout restores the default shell arrangement.
 
-Create a project with a description and default preview size, import UTF-8 CSV or Parquet up to 100,000,000 bytes, and inspect original values, native/basic column types, elementary profiles, and version provenance. Preview pages contain at most 500 rows and 8 MiB, including response metadata; wide rows produce shorter pages without skipping rows. Parquet integers/decimals remain exact text, and NULL stays distinct from an empty string. No dataset content is sent to an LLM.
+Create a project with a description and default preview size, import UTF-8 CSV or Parquet up to 100,000,000 bytes, and inspect original values, native/basic column types, elementary profiles, and version provenance. Preview pages contain at most 500 rows and 8 MiB, including response metadata; wide rows produce shorter pages without skipping rows. Parquet integers/decimals remain exact text, and NULL stays distinct from an empty string. Import, profile and chart operations are local; the assistant sends only explicitly reviewed metadata after approval, never attached dataset rows.
 
 Application metadata lives in SQLite under `~/.datapi/workbench`; original files and separate immutable DuckDB versions use generated paths. Imports stream to staging while hashing. Failed or cancelled imports publish no dataset; Retry import requests the original file again for a fresh upload. Duplicate hashes are identified only within the same project, without sharing dataset IDs or storage. Existing JSON-backed projects migrate on startup while retaining original files and legacy metadata; a failed migration stops startup with a safe error rather than discarding data.
 
@@ -95,9 +95,17 @@ Chart limits are separate from profiling limits: a deterministic sample of at mo
 
 Filters and aggregates operate on the bounded sample, not on the whole dataset unless every row fits; sampled counts are not population estimates. The studio discloses sampling, omitted marks/rows, missing values and approximate arithmetic. Export PNG, SVG or HTML, or inspect/export the JSON specification with its frozen result and Python plotting code. Python reproduces frozen bounded aggregates/observations, not a source-data transformation, and is never executed by the application. Exports can contain selected bounded observations, category labels and other dataset values; review them before sharing.
 
-Code, Models and assistant execution remain **not connected in this stage**: no application Python execution, model training or AI-provider calls. Prompt 5 visualization is complete; Prompt 6 and every later stage require separate approval.
+After profiling, open **Assistant → Set up assistant / load history**. Choose a provider/model and configure its literal API key under **Provider credentials**. Keys stay in server memory, are cleared on restart, and are never saved in browser preferences or run history. Supported providers: Anthropic, OpenAI, Google, Mistral, xAI, Groq, OpenRouter and Cerebras. Ambient Pi/environment credentials, OAuth and custom endpoints are deliberately not loaded. “Configured” means a key was supplied, not that it was authenticated.
 
-Focused checks (from the repository root; no full build or provider tests):
+Write an independent request, choose up to 32 fields (initially the first 24), and select **Review exact payload**. Current chart filter fields and literal values are additionally disclosed. Inspect the exact system/user messages, recipient, profile evidence, dataset version and artifact hash; then check the approval box and select **Approve and send**. Names, filters, statistics and your request may contain sensitive information. No rows, cell samples, storage paths, previous turns or artifact contents are attached. Changing the request, provider, fields or dataset context invalidates approval.
+
+Runs retain validated suggestions, evidence references, model-reported confidence, status, token/cache usage, latency and safe errors. Evidence-linked conclusions remain AI inferences, not verified facts; uncited claims are hypotheses requiring validation. Malformed output is rejected as a whole, without automatic repair or retry. Accept/reject records a review decision only. For chart proposals, **Accept → Preview chart locally → Apply** saves only a version-bound chart configuration. **Revert chart** deletes that owned configuration only if it remains unchanged. Original data and run history remain intact. Generated code is inspect-only.
+
+Assistant limits: one generation at a time, five-minute deadline, 96 KiB total system/user payload, 128 KiB output and 12 suggestions per response. At most ten single-use approvals and eight bounded chart previews remain in memory for ten minutes. SQLite retains up to 100 runs per dataset, pruning oldest terminal runs; interrupted runs recover as failed. Each request uses a fresh public Pi SDK session with no tools, extensions, skills, ambient context or conversation history. Its fixed subprocess uses sanitized environment variables and a 256 MiB JavaScript heap limit, not an OS sandbox or native-memory quota. Model discovery uses the offline built-in catalog; missing generated catalog data requires `npm run hydrate:model-data` during setup, not an implicit network refresh.
+
+Code execution, arbitrary transformations and model training remain disabled. Prompt 6 read-only assistant integration is the current stage; Prompt 7 and later require separate approval.
+
+Focused checks (from the repository root; no full build or live provider tests):
 
 ```bash
 node --test packages/workbench/test/browser/shell.test.ts packages/workbench/test/browser/ingestion.test.ts
@@ -106,11 +114,12 @@ node --test packages/workbench/test/format-validation.test.ts packages/workbench
 node --test packages/workbench/test/dataset-profiler.test.ts packages/workbench/test/profile-worker.test.ts packages/workbench/test/dataset-profile-storage.test.ts packages/workbench/test/browser/profile.test.ts
 node --test packages/workbench/test/chart-spec.test.ts packages/workbench/test/chart-engine.test.ts packages/workbench/test/chart-worker.test.ts packages/workbench/test/chart-storage.test.ts
 node --test packages/workbench/test/browser/chart-renderer.test.ts packages/workbench/test/browser/chart-studio.test.ts
+node --test packages/workbench/test/assistant-context.test.ts packages/workbench/test/assistant-driver.test.ts packages/workbench/test/assistant-service.test.ts packages/workbench/test/assistant-storage.test.ts packages/workbench/test/assistant-server.test.ts packages/workbench/test/browser/assistant.test.ts
 npm run typecheck --workspace=@earendil-works/pi-workbench
 npm run check
 ```
 
-Tests cover shell interaction, ingestion controls, CSV/Parquet values, pagination, cancellation/retry, migration, project isolation, real Windows worker resource/lifecycle boundaries, deterministic charts, version-bound configuration persistence, comparisons and export safety. The Prompt 5 checkpoint passed all 164 focused tests across these 19 files and `npm run check`, plus actual browser chart/comparison/export and responsive-layout smoke checks. `npm run check` does not run tests. See the [implementation plan](docs/data-science-workbench-plan.md#prompt-5-current-checkpoint) for verification details.
+Tests cover shell interaction, ingestion controls, CSV/Parquet values, pagination, cancellation/retry, migration, project isolation, real Windows worker resource/lifecycle boundaries, deterministic charts, version-bound configuration persistence, comparisons, export safety and assistant approval/privacy/lifecycle behavior. Assistant SDK tests use its deterministic faux provider, not paid API calls. The Prompt 5 checkpoint passed all 164 focused tests across its 19 files; later-stage evidence is recorded in the [implementation plan](docs/data-science-workbench-plan.md#prompt-6-current-checkpoint). `npm run check` checks Node code with the root configuration and browser code with the DOM configuration; it does not run tests.
 
 ## Building standalone binaries from release source
 

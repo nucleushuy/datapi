@@ -1,4 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
+import type { AssistantRun } from "./assistant-contracts.ts";
 import type { ChartRecord } from "./chart-contracts.ts";
 import type { Dataset, ImportJob, Project } from "./contracts.ts";
 import type { DatasetProfile } from "./profile-contracts.ts";
@@ -16,7 +17,7 @@ export class MetadataStore {
 		this.#db = new DatabaseSync(path, { allowExtension: false });
 		this.#db.exec("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;");
 		const version = this.#db.prepare("PRAGMA user_version").get()?.user_version;
-		if (version !== 0 && version !== 1 && version !== 2 && version !== 3) {
+		if (version !== 0 && version !== 1 && version !== 2 && version !== 3 && version !== 4) {
 			this.#db.close();
 			throw new Error("Unsupported application metadata version.");
 		}
@@ -46,8 +47,16 @@ export class MetadataStore {
 				PRIMARY KEY(project_id,dataset_id,id),
 				FOREIGN KEY(project_id,dataset_id) REFERENCES datasets(project_id,id)
 			);
+			CREATE TABLE IF NOT EXISTS assistant_runs (
+				project_id TEXT NOT NULL, dataset_id TEXT NOT NULL, id TEXT NOT NULL,
+				created_at TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('running','completed','cancelled','failed')),
+				metadata TEXT NOT NULL,
+				PRIMARY KEY(project_id,dataset_id,id),
+				FOREIGN KEY(project_id,dataset_id) REFERENCES datasets(project_id,id)
+			);
+			CREATE INDEX IF NOT EXISTS assistant_runs_history ON assistant_runs(project_id,dataset_id,created_at,id);
 			CREATE TABLE IF NOT EXISTS migrations (name TEXT PRIMARY KEY);
-			PRAGMA user_version=3;
+			PRAGMA user_version=4;
 		`);
 	}
 	get migrated(): boolean {
@@ -168,6 +177,54 @@ export class MetadataStore {
 	}
 	deleteChart(projectId: string, datasetId: string, id: string): void {
 		this.#db.prepare("DELETE FROM charts WHERE project_id=? AND dataset_id=? AND id=?").run(projectId, datasetId, id);
+	}
+	assistantRuns(projectId: string, datasetId: string): AssistantRun[] {
+		return this.#db
+			.prepare(
+				"SELECT metadata FROM assistant_runs WHERE project_id=? AND dataset_id=? ORDER BY created_at DESC,id DESC",
+			)
+			.all(projectId, datasetId)
+			.map((row) => decode<AssistantRun>(row)!);
+	}
+	assistantRun(projectId: string, datasetId: string, id: string): AssistantRun | undefined {
+		return decode<AssistantRun>(
+			this.#db
+				.prepare("SELECT metadata FROM assistant_runs WHERE project_id=? AND dataset_id=? AND id=?")
+				.get(projectId, datasetId, id),
+		);
+	}
+	putAssistantRun(run: AssistantRun): void {
+		this.#db
+			.prepare(
+				"INSERT INTO assistant_runs(project_id,dataset_id,id,created_at,state,metadata) VALUES (?,?,?,?,?,?) ON CONFLICT(project_id,dataset_id,id) DO UPDATE SET state=excluded.state,metadata=excluded.metadata",
+			)
+			.run(run.projectId, run.datasetId, run.id, run.createdAt, run.state, JSON.stringify(run));
+	}
+	assistantRunCount(projectId: string, datasetId: string): number {
+		return Number(
+			this.#db
+				.prepare("SELECT COUNT(*) AS count FROM assistant_runs WHERE project_id=? AND dataset_id=?")
+				.get(projectId, datasetId)?.count,
+		);
+	}
+	pruneAssistantRuns(projectId: string, datasetId: string): void {
+		this.#db
+			.prepare(
+				"DELETE FROM assistant_runs WHERE project_id=? AND dataset_id=? AND id IN (SELECT id FROM assistant_runs WHERE project_id=? AND dataset_id=? AND state<>'running' ORDER BY created_at,id LIMIT MAX(0,(SELECT COUNT(*) FROM assistant_runs WHERE project_id=? AND dataset_id=?)-99))",
+			)
+			.run(projectId, datasetId, projectId, datasetId, projectId, datasetId);
+	}
+	recoverAssistantRuns(): void {
+		this.transaction(() => {
+			for (const row of this.#db.prepare("SELECT metadata FROM assistant_runs WHERE state='running'").all()) {
+				const run = decode<AssistantRun>(row)!;
+				run.state = "failed";
+				run.error =
+					"The server stopped before this assistant run completed. Review and approve a new request to retry.";
+				run.updatedAt = new Date().toISOString();
+				this.putAssistantRun(run);
+			}
+		});
 	}
 	job(projectId: string, id: string): ImportJob | undefined {
 		return decode<ImportJob>(

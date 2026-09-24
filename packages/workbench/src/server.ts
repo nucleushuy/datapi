@@ -3,12 +3,16 @@ import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
+import type { AssistantDriver } from "./assistant-contracts.ts";
+import { PiAssistantDriver } from "./assistant-driver.ts";
+import { AssistantService } from "./assistant-service.ts";
 import { MAX_DECODED_BYTES, MAX_PREVIEW_ROWS, MAX_UPLOAD_BYTES, PAGE_SIZE, type ProjectSettings } from "./contracts.ts";
 import { WorkbenchError, WorkbenchStore } from "./storage.ts";
 
 export interface WorkbenchOptions {
 	dataDir: string;
 	port?: number;
+	assistantDriver?: AssistantDriver;
 }
 
 export interface WorkbenchApplication {
@@ -69,6 +73,8 @@ export async function startWorkbench(options: WorkbenchOptions): Promise<Workben
 	};
 	const store = new WorkbenchStore(options.dataDir);
 	await store.init();
+	const sdkDriver = new PiAssistantDriver();
+	const assistant = new AssistantService(store, options.assistantDriver ?? sdkDriver);
 	const token = randomBytes(32).toString("hex");
 	const tokenBytes = Buffer.from(token);
 	let origin = "";
@@ -122,6 +128,23 @@ export async function startWorkbench(options: WorkbenchOptions): Promise<Workben
 			throw new WorkbenchError(403, "This session has expired. Reload the workbench.");
 		}
 		const parts = path.split("/").filter(Boolean);
+		if (path === "/api/assistant/models" && method === "GET") {
+			json(response, 200, await assistant.models());
+			return;
+		}
+		if (path === "/api/assistant/credentials" && method === "POST") {
+			const input = await readMetadata(request);
+			if (Object.keys(input).length !== 2 || !Object.hasOwn(input, "provider") || !Object.hasOwn(input, "apiKey"))
+				throw new WorkbenchError(400, "Provide only the provider and literal API key.");
+			await sdkDriver.setCredential(input.provider, input.apiKey);
+			json(response, 200, { configured: true });
+			return;
+		}
+		if (parts.length === 4 && parts[1] === "assistant" && parts[2] === "credentials" && method === "DELETE") {
+			await sdkDriver.deleteCredential(parts[3]);
+			json(response, 200, { configured: false });
+			return;
+		}
 		if (path === "/api/projects") {
 			if (method === "GET") {
 				json(response, 200, await store.listProjects());
@@ -208,6 +231,116 @@ export async function startWorkbench(options: WorkbenchOptions): Promise<Workben
 				if (datasetId && parts.length === 5 && method === "GET") {
 					json(response, 200, await store.getDataset(projectId, datasetId));
 					return;
+				}
+				if (datasetId && parts[5] === "transforms") {
+					if (parts.length === 7 && parts[6] === "history" && method === "GET") {
+						json(response, 200, await store.transformHistory(projectId, datasetId));
+						return;
+					}
+					if (parts.length === 8 && parts[6] === "previews" && method === "DELETE") {
+						json(response, 200, await store.discardTransform(projectId, datasetId, parts[7]));
+						return;
+					}
+					if (parts.length === 7 && method === "POST") {
+						await store.getDataset(projectId, datasetId);
+						const input = await readMetadata(request);
+						if (parts[6] === "apply") {
+							json(response, 200, await store.applyTransform(projectId, datasetId, input));
+							return;
+						}
+						if (parts[6] === "undo" || parts[6] === "redo") {
+							json(response, 200, parts[6] === "undo"
+								? await store.undoTransform(projectId, datasetId, input)
+								: await store.redoTransform(projectId, datasetId, input));
+							return;
+						}
+						if (parts[6] === "preview") {
+							if (Object.keys(input).length !== 1 || !Object.hasOwn(input, "spec"))
+								throw new WorkbenchError(400, "Provide only a transformation specification.");
+							const controller = new AbortController();
+							const close = () => {
+								if (!response.writableFinished) controller.abort();
+							};
+							response.once("close", close);
+							if (response.destroyed) controller.abort();
+							try {
+								const preview = await store.previewTransform(projectId, datasetId, input.spec, controller.signal);
+								if (!response.destroyed) json(response, 201, preview);
+							} finally {
+								response.off("close", close);
+							}
+							return;
+						}
+					}
+				}
+				if (datasetId && parts[5] === "assistant") {
+					if (parts.length === 7 && parts[6] === "prepare" && method === "POST") {
+						json(response, 201, await assistant.prepare(projectId, datasetId, await readMetadata(request)));
+						return;
+					}
+					if (parts[6] === "runs") {
+						const runId = parts[7];
+						if (parts.length === 7 && method === "GET") {
+							json(response, 200, await assistant.list(projectId, datasetId));
+							return;
+						}
+						if (parts.length === 7 && method === "POST") {
+							json(response, 202, await assistant.start(projectId, datasetId, await readMetadata(request)));
+							return;
+						}
+						if (runId && parts.length === 8 && method === "GET") {
+							json(response, 200, await assistant.get(projectId, datasetId, runId));
+							return;
+						}
+						if (runId && parts.length === 8 && method === "DELETE") {
+							json(response, 200, await assistant.cancel(projectId, datasetId, runId));
+							return;
+						}
+						if (runId && parts.length === 11 && parts[8] === "suggestions" && method === "POST") {
+							const suggestionId = parts[9];
+							const action = parts[10];
+							const input = await readMetadata(request);
+							if (action === "status") {
+								json(
+									response,
+									200,
+									await assistant.transition(projectId, datasetId, runId, suggestionId, input),
+								);
+								return;
+							}
+							if (action === "apply") {
+								json(response, 200, await assistant.apply(projectId, datasetId, runId, suggestionId, input));
+								return;
+							}
+							if (Object.keys(input).length !== 0)
+								throw new WorkbenchError(400, "This action accepts no additional fields.");
+							if (action === "revert") {
+								json(response, 200, await assistant.revert(projectId, datasetId, runId, suggestionId));
+								return;
+							}
+							if (action === "preview") {
+								const controller = new AbortController();
+								const close = () => {
+									if (!response.writableFinished) controller.abort();
+								};
+								response.once("close", close);
+								if (response.destroyed) controller.abort();
+								try {
+									const preview = await assistant.preview(
+										projectId,
+										datasetId,
+										runId,
+										suggestionId,
+										controller.signal,
+									);
+									if (!response.destroyed) json(response, 200, preview);
+								} finally {
+									response.off("close", close);
+								}
+								return;
+							}
+						}
+					}
 				}
 				if (datasetId && parts.length === 6 && parts[5] === "preview" && method === "GET") {
 					const offsetText = url.searchParams.get("offset") ?? "0";
@@ -306,6 +439,7 @@ export async function startWorkbench(options: WorkbenchOptions): Promise<Workben
 			});
 		});
 	} catch (error) {
+		await Promise.all([assistant.close(), sdkDriver.close()]);
 		await store.close();
 		throw error;
 	}
@@ -322,6 +456,7 @@ export async function startWorkbench(options: WorkbenchOptions): Promise<Workben
 					server.close((error) => (error ? reject(error) : resolve()));
 				});
 				server.closeAllConnections();
+				await Promise.all([assistant.close(), sdkDriver.close()]);
 				await store.close();
 				await stopped;
 			})();

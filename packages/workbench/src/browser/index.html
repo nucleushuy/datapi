@@ -12,7 +12,7 @@
 		<a class="skip-link" href="#workspace">Skip to workspace</a>
 		<header class="app-header">
 			<a class="brand" href="/" aria-label="Data Pi home"><span class="brand-mark" aria-hidden="true">dp</span>data pi<span class="brand-caption">/ workbench</span></a>
-			<div class="privacy"><span class="status-dot" aria-hidden="true"></span><strong>Local only</strong><span class="privacy-detail">No data sent to an LLM</span></div>
+			<div class="privacy" role="status"><span class="status-dot" aria-hidden="true"></span><strong id="assistant-privacy-state">Approval required</strong><span id="assistant-privacy-detail" class="privacy-detail">AI sharing is opt-in; review the exact payload first</span></div>
 			<nav class="header-actions" aria-label="Workbench controls">
 				<button id="command-trigger" class="button command-trigger" type="button" aria-haspopup="dialog" aria-controls="command-dialog">Commands</button>
 				<button id="theme-toggle" class="button button-quiet" type="button">Light theme</button>
@@ -146,13 +146,13 @@
 					<button id="right-tab-activity" class="shell-tab" type="button" role="tab" data-right-tab="activity" aria-selected="false" aria-controls="right-panel-activity" tabindex="-1">Activity</button>
 				</nav>
 				<section id="right-panel-assistant" class="inspector-content" role="tabpanel" aria-labelledby="right-tab-assistant" tabindex="0">
-					<p class="capability-label">Not connected in this stage</p><h3>A partner for your analysis.</h3><p>The assistant is not connected. No prompts or dataset values are sent to an LLM.</p><p>For now, explore your original rows in Data and inspect column profiles in Statistics.</p>
+					<div id="assistant-workspace"></div>
 				</section>
 				<section id="right-panel-suggestions" class="inspector-content" role="tabpanel" aria-labelledby="right-tab-suggestions" tabindex="0" hidden>
-					<p class="capability-label">Not connected in this stage</p><h3>Evidence before recommendations.</h3><p>Automated suggestions are not connected. No recommendations have been generated for your dataset.</p><p>The column profile shows observed facts: inferred types, empty values, and numeric ranges.</p>
+					<div id="assistant-suggestions"></div>
 				</section>
 				<section id="right-panel-activity" class="inspector-content" role="tabpanel" aria-labelledby="right-tab-activity" tabindex="0" hidden>
-					<p class="capability-label">No persisted run log in this stage</p><h3>Keep track of the work.</h3><p>Current import and recompute progress appears above the workspace tabs while an operation is active.</p><p>For a completed import, open Provenance in Data to inspect the preserved source and parsing details.</p>
+					<p class="capability-label">Local operations and approved AI runs</p><h3>Keep track of the work.</h3><p>Current import and recompute progress appears above the workspace tabs. Assistant run history, token usage and cancellation are available in Assistant.</p><p>For a completed import, open Provenance in Data to inspect the preserved source and parsing details.</p>
 				</section>
 				<div class="inspector-footer"><span class="eyebrow">BUILT TO BE INSPECTED</span><p>Original values stay original. Column profiles describe the data; they do not change it.</p></div>
 			</aside>

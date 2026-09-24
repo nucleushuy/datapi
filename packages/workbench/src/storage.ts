@@ -2,8 +2,15 @@ import { createHash, randomUUID } from "node:crypto";
 import type { Stats } from "node:fs";
 import { link, lstat, mkdir, open, readdir, readFile, rename, rm, unlink } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import type { AnalyticalRequest, AnalyticalResult } from "./analytical-contracts.ts";
 import { runAnalytical } from "./analytical-process.ts";
+import {
+	ASSISTANT_MAX_SUGGESTIONS,
+	type AssistantRun,
+	type AssistantSuggestion,
+	SUGGESTION_STATUSES,
+} from "./assistant-contracts.ts";
 import type { ChartRecord, ChartResult, ChartSpec } from "./chart-contracts.ts";
 import { parseChartSpec } from "./chart-spec.ts";
 import type { Dataset, DatasetFormat, ImportJob, Preview, Project, ProjectSettings } from "./contracts.ts";
@@ -137,6 +144,7 @@ export class WorkbenchStore {
 			await this.#migrateLegacy();
 			await this.#recoverArtifacts();
 			this.#metadata.recoverJobs();
+			this.#metadata.recoverAssistantRuns();
 			this.#ready = true;
 		} catch (error) {
 			this.#metadata?.close();
@@ -334,6 +342,11 @@ export class WorkbenchStore {
 		return project;
 	}
 
+	getProject(projectId: string): Project {
+		this.#assertReady();
+		return this.#project(projectId);
+	}
+
 	async listProjects(): Promise<Project[]> {
 		this.#assertReady();
 		return this.#metadata!.projects();
@@ -394,6 +407,229 @@ export class WorkbenchStore {
 		const dataset = this.#metadata!.dataset(projectId, datasetId);
 		if (!dataset) throw new WorkbenchError(404, "Requested dataset was not found in this project.");
 		return dataset;
+	}
+
+	async assistantRuns(projectId: string, datasetId: string): Promise<AssistantRun[]> {
+		await this.getDataset(projectId, datasetId);
+		this.#assertReady();
+		return this.#metadata!.assistantRuns(projectId, datasetId);
+	}
+
+	async assistantRun(projectId: string, datasetId: string, id: string): Promise<AssistantRun> {
+		await this.getDataset(projectId, datasetId);
+		this.#assertReady();
+		validateId(id);
+		const run = this.#metadata!.assistantRun(projectId, datasetId, id);
+		if (!run) throw new WorkbenchError(404, "Assistant run was not found in this dataset or has expired.");
+		return run;
+	}
+
+	#assistantSuggestion(run: AssistantRun, id: string): AssistantSuggestion {
+		if (typeof id !== "string" || !/^[a-zA-Z0-9_-]{1,80}$(?![\s\S])/u.test(id))
+			throw new WorkbenchError(400, "Invalid suggestion identifier.");
+		const suggestion = run.suggestions.find((item) => item.id === id);
+		if (!suggestion) throw new WorkbenchError(404, "Suggestion was not found in this assistant run.");
+		return suggestion;
+	}
+
+	#assistantChartName(title: string): string {
+		return this.#chartName(
+			title
+				.replace(/[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/g, " ")
+				.trim()
+				.slice(0, 120)
+				.trim() || "Assistant chart",
+		);
+	}
+
+	#assistantCurrent(run: AssistantRun): Dataset {
+		const dataset = this.#metadata!.dataset(run.projectId, run.datasetId);
+		if (!dataset) throw new WorkbenchError(404, "Requested dataset was not found in this project.");
+		if (dataset.currentVersionId !== run.datasetVersionId)
+			throw new WorkbenchError(409, "Dataset version changed. Review and approve a new assistant request.");
+		return dataset;
+	}
+
+	#validateAssistantRun(run: AssistantRun, previous: AssistantRun | undefined): void {
+		validateId(run.id);
+		validateId(run.datasetVersionId);
+		if (
+			!["running", "completed", "cancelled", "failed"].includes(run.state) ||
+			run.context.project.id !== run.projectId ||
+			run.context.dataset.id !== run.datasetId ||
+			run.context.dataset.versionId !== run.datasetVersionId ||
+			!Array.isArray(run.suggestions) ||
+			run.suggestions.length > ASSISTANT_MAX_SUGGESTIONS ||
+			(run.state !== "completed" && run.suggestions.length !== 0) ||
+			!Number.isFinite(Date.parse(run.createdAt)) ||
+			!Number.isFinite(Date.parse(run.updatedAt)) ||
+			Date.parse(run.updatedAt) < Date.parse(run.createdAt) ||
+			!Number.isFinite(run.latencyMs) ||
+			run.latencyMs < 0 ||
+			!Number.isSafeInteger(run.receivedCharacters) ||
+			run.receivedCharacters < 0 ||
+			(run.state === "failed" && (typeof run.error !== "string" || !run.error))
+		)
+			throw new WorkbenchError(400, "Assistant run state is invalid.");
+		const ids = new Set<string>();
+		for (const suggestion of run.suggestions) {
+			this.#assistantSuggestion(run, suggestion.id);
+			if (ids.has(suggestion.id) || !SUGGESTION_STATUSES.includes(suggestion.status))
+				throw new WorkbenchError(400, "Assistant suggestion state is invalid.");
+			ids.add(suggestion.id);
+			if (suggestion.chartId !== null) validateId(suggestion.chartId);
+			if (
+				(suggestion.status === "applied" || suggestion.status === "reverted") !== (suggestion.chartId !== null) ||
+				(suggestion.chartId !== null && suggestion.proposedAction.kind !== "chart")
+			)
+				throw new WorkbenchError(400, "Assistant chart ownership is invalid.");
+		}
+		if (!previous) {
+			if (run.state !== "running")
+				throw new WorkbenchError(409, "New assistant runs must begin in the running state.");
+			this.#assistantCurrent(run);
+			return;
+		}
+		if (
+			previous.datasetVersionId !== run.datasetVersionId ||
+			previous.createdAt !== run.createdAt ||
+			previous.provider !== run.provider ||
+			previous.modelId !== run.modelId ||
+			previous.request !== run.request ||
+			previous.payloadHash !== run.payloadHash ||
+			!isDeepStrictEqual(previous.context, run.context) ||
+			(previous.state !== "running" && previous.state !== run.state)
+		)
+			throw new WorkbenchError(409, "Assistant run identity or completed state cannot be changed.");
+		if (previous.state === "running") {
+			if (run.suggestions.some((suggestion) => suggestion.status !== "proposed" || suggestion.chartId !== null))
+				throw new WorkbenchError(409, "New suggestions must be proposed without saved charts.");
+			return;
+		}
+		if (previous.summary !== run.summary || previous.suggestions.length !== run.suggestions.length)
+			throw new WorkbenchError(409, "Completed assistant output cannot be replaced.");
+		for (let index = 0; index < run.suggestions.length; index++) {
+			const current = run.suggestions[index];
+			const old = previous.suggestions[index];
+			const { status: _oldStatus, error: _oldError, ...oldContent } = old;
+			const { status: _newStatus, error: _newError, ...newContent } = current;
+			if (
+				!isDeepStrictEqual(oldContent, newContent) ||
+				(current.status !== old.status &&
+					(current.status === "proposed" ||
+						[old.status, current.status].some((status) => status === "applied" || status === "reverted") ||
+						(current.status === "failed" &&
+							(old.status !== "accepted" || current.proposedAction.kind !== "chart"))))
+			)
+				throw new WorkbenchError(
+					409,
+					"Suggestion content and chart ownership require the original assistant output.",
+				);
+		}
+	}
+
+	async putAssistantRun(run: AssistantRun): Promise<void> {
+		await this.getDataset(run.projectId, run.datasetId);
+		this.#assertReady();
+		this.#metadata!.transaction(() => {
+			const previous = this.#metadata!.assistantRun(run.projectId, run.datasetId, run.id);
+			this.#validateAssistantRun(run, previous);
+			if (!previous) {
+				this.#metadata!.pruneAssistantRuns(run.projectId, run.datasetId);
+				if (this.#metadata!.assistantRunCount(run.projectId, run.datasetId) >= 100)
+					throw new WorkbenchError(
+						409,
+						"This dataset already has 100 active assistant runs. Wait for a run to finish.",
+					);
+			}
+			this.#metadata!.putAssistantRun(run);
+		});
+	}
+
+	async applyAssistantChart(run: AssistantRun, suggestionId: string, name: string): Promise<AssistantRun> {
+		await this.getDataset(run.projectId, run.datasetId);
+		this.#assertReady();
+		validateId(run.id);
+		let updated!: AssistantRun;
+		this.#metadata!.transaction(() => {
+			const previous = this.#metadata!.assistantRun(run.projectId, run.datasetId, run.id);
+			if (!previous) throw new WorkbenchError(404, "Assistant run was not found in this dataset or has expired.");
+			if (!isDeepStrictEqual(previous, run))
+				throw new WorkbenchError(409, "Assistant run changed. Refresh before applying.");
+			const suggestion = this.#assistantSuggestion(previous, suggestionId);
+			if (
+				previous.state !== "completed" ||
+				suggestion.status !== "accepted" ||
+				suggestion.chartId !== null ||
+				suggestion.proposedAction.kind !== "chart"
+			)
+				throw new WorkbenchError(409, "Only accepted chart suggestions can be applied.");
+			const dataset = this.#assistantCurrent(previous);
+			const now = new Date().toISOString();
+			const chart: ChartRecord = {
+				id: randomUUID(),
+				projectId: run.projectId,
+				datasetId: run.datasetId,
+				name: this.#assistantChartName(name),
+				createdAt: now,
+				updatedAt: now,
+				spec: this.#chartSpec(dataset, suggestion.proposedAction.spec, true),
+			};
+			if (chart.name !== this.#assistantChartName(suggestion.title))
+				throw new WorkbenchError(400, "Assistant chart name must match its suggestion title.");
+			if (this.#metadata!.chartCount(run.projectId, run.datasetId) >= 100)
+				throw new WorkbenchError(
+					409,
+					"This dataset already has 100 saved charts. Delete a chart before saving another.",
+				);
+			suggestion.status = "applied";
+			suggestion.chartId = chart.id;
+			suggestion.error = null;
+			previous.updatedAt = now;
+			this.#metadata!.putChart(chart);
+			this.#metadata!.putAssistantRun(previous);
+			updated = previous;
+		});
+		return updated;
+	}
+
+	async revertAssistantChart(run: AssistantRun, suggestionId: string): Promise<AssistantRun> {
+		await this.getDataset(run.projectId, run.datasetId);
+		this.#assertReady();
+		validateId(run.id);
+		let updated!: AssistantRun;
+		this.#metadata!.transaction(() => {
+			const previous = this.#metadata!.assistantRun(run.projectId, run.datasetId, run.id);
+			if (!previous) throw new WorkbenchError(404, "Assistant run was not found in this dataset or has expired.");
+			if (!isDeepStrictEqual(previous, run))
+				throw new WorkbenchError(409, "Assistant run changed. Refresh before reverting.");
+			const suggestion = this.#assistantSuggestion(previous, suggestionId);
+			if (
+				previous.state !== "completed" ||
+				suggestion.status !== "applied" ||
+				!suggestion.chartId ||
+				suggestion.proposedAction.kind !== "chart"
+			)
+				throw new WorkbenchError(409, "Only applied chart suggestions can be reverted.");
+			validateId(suggestion.chartId);
+			const chart = this.#metadata!.chart(run.projectId, run.datasetId, suggestion.chartId);
+			if (
+				!chart ||
+				!isDeepStrictEqual(chart.spec, suggestion.proposedAction.spec) ||
+				chart.name !== this.#assistantChartName(suggestion.title)
+			)
+				throw new WorkbenchError(
+					409,
+					"The assistant chart was edited or removed. Intentional chart edits cannot be reverted here.",
+				);
+			suggestion.status = "reverted";
+			suggestion.error = null;
+			previous.updatedAt = new Date().toISOString();
+			this.#metadata!.deleteChart(run.projectId, run.datasetId, chart.id);
+			this.#metadata!.putAssistantRun(previous);
+			updated = previous;
+		});
+		return updated;
 	}
 
 	async listCharts(projectId: string, datasetId: string): Promise<ChartRecord[]> {

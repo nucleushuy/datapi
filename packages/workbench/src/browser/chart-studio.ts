@@ -23,11 +23,14 @@ interface StudioOptions {
 	message?(error: unknown): string;
 	onProfile(): void;
 	onBusy?(busy: boolean): void;
+	onContextChange?(): void;
 }
 export interface ChartStudioController {
 	update(context: StudioContext): void;
 	clear(): void;
 	setBlocked(blocked: boolean): void;
+	getSelection(): { selectedColumns: number[]; filters: ChartFilter[]; revision: number };
+	applySpec(spec: ChartSpec): void;
 	dispose(): void;
 }
 type Pane = "left" | "right";
@@ -73,11 +76,13 @@ export function initializeChartStudio(container: HTMLElement, options: StudioOpt
 	let saving = false;
 	let disposed = false;
 	let generation = 0;
+	let contextRevision = 0;
 	let renderSequence = 0;
 	let renderAbort: AbortController | null = null;
 	let listAbort: AbortController | null = null;
 	let saveAbort: AbortController | null = null;
 	let listed = false;
+	let skipNextVisibleList = false;
 	let records: ChartRecord[] = [];
 	let selectedId = "";
 	let selectedRows = new Set<number>();
@@ -346,7 +351,10 @@ export function initializeChartStudio(container: HTMLElement, options: StudioOpt
 	container.replaceChildren(heading, gate, feedback, storageNote, workspace);
 	const panel = container.closest<HTMLElement>("[role='tabpanel']") ?? container;
 	const visibility = new window.MutationObserver(() => {
-		if (!panel.hidden) void loadList();
+		if (!panel.hidden) {
+			if (skipNextVisibleList) skipNextVisibleList = false;
+			else void loadList();
+		}
 	});
 	visibility.observe(panel, { attributes: true, attributeFilter: ["hidden"] });
 	const theme = new window.MutationObserver(() => {
@@ -526,6 +534,8 @@ export function initializeChartStudio(container: HTMLElement, options: StudioOpt
 		paint("left");
 		paint("right");
 		renderTable();
+		contextRevision++;
+		options.onContextChange?.();
 	}
 	function renderFields(): void {
 		const words = search.value.trim().toLowerCase().split(/\s+/);
@@ -1225,11 +1235,15 @@ export function initializeChartStudio(container: HTMLElement, options: StudioOpt
 		}
 		persist();
 		renderEditor();
+		contextRevision++;
+		options.onContextChange?.();
 	});
 	paneSelect.addEventListener("change", () => {
 		active = paneSelect.value as Pane;
 		persist();
 		renderEditor();
+		contextRevision++;
+		options.onContextChange?.();
 	});
 	savedSelect.addEventListener("change", () => {
 		selectedId = savedSelect.value;
@@ -1294,6 +1308,37 @@ export function initializeChartStudio(container: HTMLElement, options: StudioOpt
 			void loadList();
 		},
 		clear,
+		getSelection() {
+			if (!state || !context) return { selectedColumns: [], filters: [], revision: contextRevision };
+			const spec = state[active];
+			const columns =
+				spec.type === "missingness"
+					? context.dataset.schema.slice(0, 24).map((column) => column.index)
+					: spec.type === "correlation"
+						? context.dataset.schema
+								.filter((column) => column.basicType === "number")
+								.slice(0, 12)
+								.map((column) => column.index)
+						: encodings.flatMap((encoding) => (spec[encoding] === null ? [] : [spec[encoding]!]));
+			return {
+				selectedColumns: [...new Set([...columns, ...spec.filters.map((filter) => filter.column)])],
+				filters: spec.filters.map((filter) => ({ ...filter })),
+				revision: contextRevision,
+			};
+		},
+		applySpec(spec) {
+			if (!context || !state || disposed || busy || blocked)
+				throw new Error("Wait for the current operation before opening this chart.");
+			const parsed = parseChartSpec(spec, context.dataset.schema, context.dataset.currentVersionId);
+			skipNextVisibleList = panel.hidden;
+			active = "left";
+			state.mode = "single";
+			state.left = parsed;
+			changed(false);
+			renderEditor();
+			feedback.textContent =
+				"Applied suggestion opened. Render explicitly to compute its bounded result; no query was run.";
+		},
 		setBlocked(value) {
 			if (blocked === value) return;
 			blocked = value;

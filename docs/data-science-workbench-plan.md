@@ -1,6 +1,6 @@
 # Data-science workbench implementation plan
 
-Status: architecture and Prompts 2–5 approved. Three-panel shell, CSV/Parquet ingestion, deterministic rich profiling, visualization and comparisons implemented and verified. Stop at Prompt 5; Prompt 6 and every later stage require separate approval.
+Status: architecture and Prompts 2–6 approved. Shell, ingestion, profiling, visualization and read-only Pi assistant integration are implemented. Stop at Prompt 6; Prompt 7 and later require separate approval.
 
 ## 1. Scope and current checkpoint
 
@@ -12,7 +12,7 @@ Prompt 0's operating rules are already present in `AGENTS.md`. No duplicate inst
 
 ### Current uncommitted implementation
 
-The original CSV-only slice has been reconciled into `packages/workbench`: native-DOM shell, SQLite application metadata, project-scoped durable jobs, streamed CSV/Parquet imports, immutable originals, separate versioned DuckDB artifacts, and bounded previews. Prompt 4 adds versioned deterministic profiles and evidence-based quality reports; Prompt 5 adds deterministic charts, saved configurations, comparisons and bounded exports. Assistant integration and application Python execution remain unimplemented.
+The implementation is in `packages/workbench`: native-DOM shell, SQLite application metadata, project-scoped durable jobs, streamed CSV/Parquet imports, immutable originals, versioned DuckDB artifacts and bounded previews. Prompt 4 adds deterministic profiles and quality reports; Prompt 5 adds charts, comparisons and bounded exports. Prompt 6 adds explicit metadata-sharing approvals, public-SDK suggestions and locally previewed chart proposals. Arbitrary transformations, model training and application Python execution remain disabled.
 
 Changes remain uncommitted. Legacy JSON projects migrate under the existing storage lock with source-hash verification; originals and legacy metadata are retained. The former JSONL preview engine is no longer used.
 
@@ -46,7 +46,7 @@ This historical checkpoint was not a green baseline. Subsequent Prompt 3–5 res
 - Browser exercised full and sampled reports, column search/selection, severity filtering, cancellation/rerun, cache reuse, restart persistence, dataset switching and 390px layout. Initial preview now finishes before saved-profile lookup to avoid competing for analytical admission.
 - Focused workbench tests passed after updating the intentional control-request size boundary and adding two preview/profile admission regressions; final `npm run check` passed. The fixed-worker 512-column fixture passes without relaxing memory limits. Validation commands and remaining limitations are documented in the root README.
 
-### Prompt 5 current checkpoint
+### Prompt 5 checkpoint (history)
 
 - Profile first, then use Visualize field controls and explicit rendering for histogram, box plot, bar, line, scatter, heatmap, correlation and missingness. Model-result remains an untrained placeholder. Data/chart linked marks, independent chart/chart panes and shared-encoding filtered variants preserve original data. Configuration CRUD is capped at 100 per dataset and bound to its current version; comparison specifications persist across reloads.
 - Sampling, referenced-field projection, mark/category/facet limits, linked-table and result caps are documented in the [root README](../README.md#local-data-workbench). Filters and aggregates describe only the bounded sample, not population estimates. Panes run sequentially through the existing cancellable analytical worker. JSON includes the specification and frozen result; exported Python plots those frozen aggregates/observations rather than transforming source data. Exports may disclose bounded dataset observations and labels.
@@ -54,6 +54,16 @@ This historical checkpoint was not a green baseline. Subsequent Prompt 3–5 res
 - Actual browser smoke covered an 80-row full result and a 2,500-of-5,000-row sampled result; all eight chart types and the untrained placeholder; scatter color/size/facet controls, data/chart linked marks, chart/chart, filtered variants and reload persistence; saved-configuration create/load/update/duplicate/rename and confirmed deletion; and 390px mobile layout without page overflow.
 - Browser downloads completed for PNG (293,051 bytes), SVG (36,100 bytes), standalone HTML (92,353 bytes) and JSON (47,615 bytes). Standalone HTML rendered with no scripts or remote resources. All eight exported Python chart scripts exited successfully with matplotlib 3.10.3; the Agg backend emitted expected noninteractive `show` warnings. This was external export verification, not application Python execution.
 - No AI-provider calls, model training, arbitrary transformations or application Python execution were enabled. Prompt 5 is complete; stop before Prompt 6 pending approval.
+
+### Prompt 6 current checkpoint
+
+- Public Pi SDK integration lives in `assistant-driver.ts` and `assistant-sdk-worker.ts`, launched through the existing tsx/root source-alias workflow. No Pi core changes. Fresh in-memory sessions use no tools or ambient resources; the public session system prompt is compared with the exact approved text before generation. The virtual working directory is fixed and nonsensitive.
+- `assistant-context.ts` explicitly selects metadata/statistics; `assistant-validation.ts` rejects unknown fields, unsupported charts, fabricated evidence IDs, undisclosed columns and model-owned lifecycle state. Rows, samples, storage paths and previous turns are never attached. Evidence linkage does not verify an interpretation; the UI labels inference/hypothesis status.
+- `assistant-service.ts` manages bounded, expiring, single-use approvals, one active generation, progress counts, usage, cancellation and safe failures. Metadata schema 4 persists scoped runs and recovers interrupted work. Applying/reverting a suggestion atomically changes only its owned chart configuration, protecting edited charts and preserving original data.
+- Provider keys are explicit literal values held only in server memory. No ambient Pi/environment credentials, OAuth, custom endpoints or credential command expansion. Offline discovery exposed 450 models across eight supported providers with zero configured credentials in the actual subprocess smoke.
+- Actual browser smoke exercised three-field disclosure without private cells, approval, completed suggestions, local chart preview/save/open/revert, malformed-output rejection, cancellation, and a 390px viewport without horizontal page overflow. The browser used a clearly identified offline test driver; actual SDK generation is exercised separately with Pi's deterministic faux provider. No paid provider inference was performed.
+- Final validation passed 64 assistant tests across six files and 73 affected existing regression tests across eight files (137 total), plus `npm run check` with Node/DOM typechecking and browser bundling. The refreshed application listed all eight supported providers as unconfigured and disabled preparation without credentials. Temporary smoke data was separate from the normal application store.
+- Limits and usage are in the root README. SDK process separation and a JavaScript heap limit are not a sandbox. Generated code remains inspect-only. Stop before Prompt 7 pending approval.
 
 ## 2. Repository map
 
@@ -70,7 +80,7 @@ Paths in this section exist. Proposed paths are labelled separately below.
 | `packages/coding-agent/src/client` | Public `@earendil-works/pi-coding-agent/client` exports `RemoteSession` and transcript projection. Useful if the experimental remote stack is deliberately adopted; not needed for initial ingestion. |
 | `packages/session-backends/sqlite-node` | Real `node:sqlite` backend for agent-core session repositories, migrations, writer leases and optional FTS search. Not an application project/dataset database and not a drop-in SDK `SessionManager`. |
 | `packages/telemetry`, `packages/evals` | Existing telemetry contracts and evaluation workspace. Do not build a second agent telemetry system or run paid-provider evaluations for workbench tests. |
-| `packages/workbench` | Private local workbench through Prompt 5: shell, CSV/Parquet ingestion, profiles, deterministic charts and comparisons; later integrations remain gated. |
+| `packages/workbench` | Private local workbench through Prompt 6: shell, ingestion, profiles, charts/comparisons and explicitly approved read-only assistant suggestions; execution and later stages remain gated. |
 
 Existing browser artifacts include `packages/coding-agent/src/core/export-html` and `scripts/tool-stats.ts`. A static transcript export or tool-usage chart report is not a live workbench or reusable data-charting engine.
 
@@ -82,14 +92,14 @@ Existing browser artifacts include `packages/coding-agent/src/core/export-html` 
 
 Public session operations include `subscribe`, `prompt`, `abort`, `waitForIdle`, and `dispose`. Use settled/idle semantics for turn completion rather than assuming every `agent_end` means all work finished. `defineTool` plus TypeBox parameters provides typed custom tools with cancellation, progress updates, and structured result details.
 
-Recommended service configuration:
+Implemented Prompt 6 configuration (narrower than the original later-tool proposal):
 
-- Explicit allowlist containing only application-owned tools; do not inherit read/bash/edit/write defaults.
-- Controlled resource loader and settings. No ambient project/user extensions, skills, configuration shell commands, or arbitrary context-file loading from uploaded data.
-- Application-owned mapping from project/session IDs to a dedicated `SessionManager` directory. Never accept filesystem session paths from the browser.
-- `ModelRuntime` owns provider credentials/configuration. Browser model selection uses validated IDs, not executable configuration or credential values.
-- Only deliberately constructed schema/statistics/evidence context goes to a provider. Original rows are excluded by default; even column names and statistics can be sensitive.
-- Custom tools resolve authorized opaque dataset-version IDs and call application workers. They never accept unrestricted host paths or relay arbitrary shell commands.
+- Explicit empty tool allowlist. No read/bash/edit/write defaults or application tool execution.
+- Fixed resource loader and in-memory settings. No ambient extensions, skills, command expansion or context files.
+- Application-owned SQLite run history; each inference uses a fresh `SessionManager.inMemory` and no previous messages. This prevents previously approved metadata from being retransmitted implicitly.
+- `ModelRuntime` receives an explicit in-memory credential store, no models.json and no catalog-network refresh. Browser selection uses validated built-in provider/model IDs. Keys are server-memory only.
+- Only the exact approved system/user metadata envelope goes to the model. The SDK supplies provider protocol/authentication wrappers; those are not represented as dataset context.
+- Chart previews use the existing local analytical worker after validation; results are not sent back to a provider. Arbitrary tools or code remain unavailable.
 
 `SessionManager.create`, `open`, `continueRecent`, `list`, and `inMemory` are supported. Resume through these factories, not an invented `continueSession` SDK option. Lower-level `SessionRepo`/SQLite objects are different APIs.
 
@@ -204,13 +214,13 @@ Expected Prompt 1 change: this document only. Future root wiring stays limited t
 | Confirmed from source | npm/TypeScript/esbuild/Biome setup; supported Node SDK and JSONL RPC; experimental remote stack; real agent persistence; no ready multi-user web auth or analytical job service. |
 | Approved architecture | One workbench workspace; native DOM/CSS + esbuild shell; later direct public SDK integration; SQLite application metadata; DuckDB analytical process. |
 | Verified at Prompt 3 | Windows native ingestion/preview, memory enforcement and lifecycle, bounded response/decoded data, Parquet precision/list values, and observed near-limit artifact usage. DuckDB spill configuration is not an OS-wide disk quota. |
-| Needs validation before agent use | SDK resource loading isolation, exact allowed tools, server-only secret handling, approved compact context and safe streaming/reconnect behavior. |
+| Verified at Prompt 6 | Empty SDK tools/resources, server-memory credentials, exact model-visible context, schema validation, scoped history, cancellation and offline SDK/faux-provider operation. Live external inference was not exercised. |
 | Needs validation before generated code | Available Windows-compatible OS sandbox/runtime and fail-closed execution proof. Neither worker_threads nor subprocess RPC is enough. |
 | Deferred, not omitted | Hosted identity provider, deployment platform, shared database/blob storage, quotas, billing if ever needed. Decide at multi-user/deployment stages, not now. |
 
 ## 7. Milestones and stage gates
 
-Prompts 1–5 have been approved and implemented. Read each later prompt immediately before its separately approved stage; do not advance automatically.
+Prompts 1–6 have been approved and implemented. Read each later prompt immediately before its separately approved stage; do not advance automatically.
 
 | Stage | Bounded deliverable and exit gate |
 | --- | --- |
@@ -267,15 +277,15 @@ Commands below are verified from manifests/scripts, not all executed. Run from t
 | Command | Meaning and caveat |
 | --- | --- |
 | `npm install --ignore-scripts` | Hydrate workspace dependencies without lifecycle scripts. Executed before Prompt 1. |
-| `npm install --package-lock-only --ignore-scripts` | Refresh lockfile after reviewed dependency metadata changes. Executed before Prompt 1. |
-| `npm run check` | Biome **writes formatting/fixes**, then dependency/import/lock checks, root tsgo, workbench typecheck and browser bundling. Passed at Prompt 5; not a test suite. |
+| `npm install --package-lock-only --ignore-scripts` | Refresh lockfile after reviewed dependency metadata changes. Prompt 6 adds existing workspace AI/SDK dependencies and pinned tsx; no lifecycle scripts. |
+| `npm run check` | Biome **writes formatting/fixes**, then dependency/import/lock checks, root Node tsgo, browser DOM typecheck and browser bundling. Not a test suite. |
 | `npm run hydrate:model-data` | Root delegates to AI strict data-only catalog hydration. Network access required; writes ignored provider JSON, not a reason to edit `models.generated.ts`. Source-supported repair for missing data; not run during Prompt 1. |
 | `npm run check:model-data` | Validates hydrated model data. Does not replace narrow product tests. |
 | `npm run check:browser-smoke` | esbuild browser compatibility/tree-shaking check, **not** a UI browser test. |
-| `npm run dev:workbench` | Local launcher: `node packages/workbench/src/cli.ts`; defaults to loopback port 4310 and `~/.datapi/workbench`. Browser-verified through Prompt 5. |
+| `npm run dev:workbench` | Local launcher: `node packages/workbench/src/cli.ts`; defaults to loopback port 4310 and `~/.datapi/workbench`. Assistant launches its fixed SDK subprocess lazily. |
 | `npm run dev:workbench -- --port 4310 --data-dir <directory>` | Launcher with explicit data root. Placeholder must be replaced by a real path. |
-| `npm run typecheck --workspace=@earendil-works/pi-workbench` | Scoped tsgo check, includes DOM types; passed as part of Prompt 5 `npm run check`. |
-| Focused `node --test` commands in the root README | Current 19-file workbench coverage, including six chart files: 164 tests passed at Prompt 5. The original three-file, 19-test run is historical. |
+| `npm run typecheck --workspace=@earendil-works/pi-workbench` | Browser sources/tests and their shared contracts with DOM types. Root tsgo covers server/SDK sources and Node tests separately. |
+| Focused `node --test` commands in the root README | Original 19-file workbench coverage plus six assistant contract files. SDK tests use a deterministic faux provider and require no paid credentials. |
 | `node ../../node_modules/vitest/dist/cli.js --run test/client/remote-session.test.ts` from `packages/coding-agent` | Existing focused public-client contract test; command/path verified, not run in this audit. |
 | `node --test test/specific.test.ts` from `packages/tui` | Repository pattern; replace `specific.test.ts` with a verified target. |
 | `./test.sh` | Root Bash wrapper that isolates environment/config and invokes non-provider-dependent tests. Requires Bash on Windows; arguments are not a file filter. Not run. |
@@ -284,7 +294,7 @@ Commands below are verified from manifests/scripts, not all executed. Run from t
 | `npm run dev --workspace=@earendil-works/pi-server` | TypeScript watch only; does **not** launch an application server. |
 | `npm run build` / `npm run build:offline` | Existing ordered package builds. Offline requires hydrated data; neither is authorized or run by this documentation stage. |
 
-There is no generic root `dev` web-server command beyond the workbench launcher. Full SDK package-root runtime imports normally resolve built `dist` exports; do not claim direct SDK execution is ready merely because source aliases typecheck. Establish the supported source/build workflow when assistant integration is approved.
+There is no generic root `dev` web-server command beyond the workbench launcher. The assistant establishes source execution through a fixed tsx subprocess with root aliases; it does not require built `dist` artifacts. Root checking covers Node/SDK code, and the workbench DOM configuration separately covers browser sources/tests without pulling server-only SDK modules into DOM globals.
 
 Official analytical-client evidence: [DuckDB Node Neo overview](https://duckdb.org/docs/current/clients/node_neo/overview.html) documents the high-level `@duckdb/node-api` package and Windows x64 support. Local ingestion and fixed analytical-worker verification are recorded in the stage checkpoints above; future execution boundaries still require their own proof.
 
@@ -300,4 +310,4 @@ Approved architecture choices (recorded before Prompt 2):
 
 Preserve uncommitted implementation and source data. Do not automatically create branches or commit existing work; the worktree also contains the user's prompt file. Agree on checkpoint/branch action before doing either.
 
-Stop after completed Prompt 5 acceptance. Next recommended task, only after approval: read Prompt 6 in full and present its exact file scope and acceptance criteria before changing code. Prompts 6 and later remain unimplemented and individually approval-gated.
+Stop after completed Prompt 6 acceptance. Next recommended task, only after approval: read Prompt 7 in full and present exact file scope and acceptance criteria for reproducible transformations and undo. Prompt 7 and later remain unimplemented and individually approval-gated.

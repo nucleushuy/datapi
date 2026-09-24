@@ -121,7 +121,7 @@ test(
 		await state.store.close();
 		const database = new DatabaseSync(join(state.root, "workbench.sqlite"));
 		try {
-			assert.equal(database.prepare("PRAGMA user_version").get()?.user_version, 3);
+			assert.equal(database.prepare("PRAGMA user_version").get()?.user_version, 4);
 			assert.equal(
 				database
 					.prepare("SELECT dataset_version_id FROM charts WHERE project_id=? AND dataset_id=? AND id=?")

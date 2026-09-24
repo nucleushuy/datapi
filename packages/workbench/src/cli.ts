@@ -22,7 +22,7 @@ if (values.help) {
 		if (port > 65535) throw new WorkbenchError(400, "Port must be an integer from 0 through 65535.");
 		const app = await startWorkbench({ port, dataDir: resolve(values["data-dir"]) });
 		console.log(`Workbench ready at ${app.url}`);
-		console.log("Local files only. No dataset content is sent to an LLM.");
+		console.log("Local files. Assistant sends only reviewed metadata after explicit approval; never dataset rows.");
 		const stop = () => {
 			void app.close().catch(() => {
 				console.error("Could not cleanly close the workbench. Restart to recover unfinished imports.");

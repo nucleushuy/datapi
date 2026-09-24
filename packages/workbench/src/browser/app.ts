@@ -15,6 +15,7 @@ import {
 	PROFILER_VERSION,
 	type ProfileResponse,
 } from "../profile-contracts.ts";
+import { type AssistantUiContext, initializeAssistant } from "./assistant.ts";
 import { initializeChartStudio } from "./chart-studio.ts";
 import { initializeShell } from "./shell.ts";
 
@@ -221,7 +222,49 @@ const chartStudio = initializeChartStudio(element("chart-studio"), {
 		ui.runProfile.scrollIntoView?.({ block: "center" });
 		ui.runProfile.focus();
 	},
+	onContextChange() {
+		const context = currentAssistantContext();
+		if (context) assistant.update(context);
+	},
 });
+const assistant = initializeAssistant(element("assistant-workspace"), element("assistant-suggestions"), {
+	api,
+	message,
+	currentContext: currentAssistantContext,
+	onProfile() {
+		ui.runProfile.scrollIntoView?.({ block: "center" });
+		ui.runProfile.focus();
+	},
+	onSuggestions() {
+		shell.selectRight("suggestions", true);
+	},
+	onOpenChart(spec) {
+		chartStudio.applySpec(spec);
+		shell.selectCenter("visualize", true);
+	},
+	onPrivacy(state, detail) {
+		element("assistant-privacy-state").textContent = state;
+		element("assistant-privacy-detail").textContent = detail;
+	},
+});
+
+function currentAssistantContext(): AssistantUiContext | null {
+	if (!projectId || !dataset) return null;
+	const selection = chartStudio.getSelection();
+	return {
+		projectId,
+		dataset,
+		profile: richProfile,
+		selectedColumns: [
+			...new Set([
+				...selection.selectedColumns,
+				...(dataset.schema.some((column) => column.index === selectedColumn) ? [selectedColumn] : []),
+			]),
+		].sort((a, b) => a - b),
+		filters: selection.filters,
+		revision: selection.revision,
+	};
+}
 const countFormatter = new Intl.NumberFormat();
 const dateFormatter = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "medium" });
 const storagePrefix = "datapi.workbench.";
@@ -326,6 +369,7 @@ function updateControls(): void {
 		nextOffset >= currentPreview.total ||
 		currentPreview.rows.length === 0;
 	chartStudio.setBlocked(!ready || operationActive() || previewLoading || profileLoading);
+	assistant.setBlocked(!ready || operationActive() || previewLoading || profileLoading || chartBusy);
 }
 
 function previewRowLimit(preferred: number): number {
@@ -416,6 +460,7 @@ function renderEmpty(): void {
 }
 
 function resetDataset(): void {
+	assistant.clear();
 	chartStudio.clear();
 	datasetVersion++;
 	previewVersion++;
@@ -857,6 +902,8 @@ function selectColumn(index: number): void {
 		if (cell.cellIndex === selectedColumn + 1) cell.setAttribute("data-selected-column", "true");
 		else cell.removeAttribute("data-selected-column");
 	}
+	const context = currentAssistantContext();
+	if (context) assistant.update(context);
 }
 
 function renderColumnDetails(target: HTMLElement, column: ColumnProfile, profile: DatasetProfile): void {
