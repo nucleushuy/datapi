@@ -1,182 +1,156 @@
-<p align="center">
-  <a href="https://pi.dev">
-    <img alt="pi logo" src="https://pi.dev/logo-auto.svg" width="128">
-  </a>
-</p>
-<p align="center">
-  <a href="https://discord.com/invite/3cU7Bz4UPx"><img alt="Discord" src="https://img.shields.io/badge/discord-community-5865F2?style=flat-square&logo=discord&logoColor=white" /></a>
-  <a href="https://www.npmjs.com/package/@earendil-works/pi-coding-agent"><img alt="npm" src="https://img.shields.io/npm/v/@earendil-works/pi-coding-agent?style=flat-square" /></a>
-</p>
+# Data Pi
 
-> New issues and PRs from new contributors are auto-closed by default. Maintainers review auto-closed issues daily. See [CONTRIBUTING.md](CONTRIBUTING.md).
+**A local-first data-science workbench built around [Pi](https://pi.dev).**
 
-# Pi Agent Harness
+Data Pi brings dataset exploration, profiling, visualization, reproducible transformations, and AI-assisted discussion into one browser workspace. Inspect your data in the center, navigate projects on the left, and keep a persistent Pi conversation on the right.
 
-This is the home of the Pi agent harness project including our self extensible coding agent.
+The goal is a keyboard-first workbench for data scientists—not a generic dashboard or an unrestricted coding agent. Dataset versions, columns, charts, evidence, and transformation records are explicit, inspectable objects.
 
-* **[@earendil-works/pi-coding-agent](packages/coding-agent)**: Interactive coding agent CLI
-* **[@earendil-works/pi-agent-core](packages/agent)**: Agent runtime with tool calling and state management
-* **[@earendil-works/pi-ai](packages/ai)**: Unified multi-provider LLM API (OpenAI, Anthropic, Google, …)
+> **Status:** working local development application, Windows x64 first. Dataset tools and read-only streaming chat are implemented. Agent-controlled operations, arbitrary code execution, model training, and multi-user hosting are not implemented.
 
-To learn more about Pi:
+## What works today
 
-* [Visit pi.dev](https://pi.dev), the project website with demos
-* [Read the documentation](https://pi.dev/docs/latest), but you can also ask the agent to explain itself
+| Area | Capabilities |
+| --- | --- |
+| Import | UTF-8 CSV and Parquet, streamed uploads, progress/cancellation, immutable originals, project-scoped duplicate detection |
+| Explore | Paginated original-value previews, searchable columns, schema and version provenance |
+| Profile | Deterministic statistics, missingness, numeric relationships, and evidence-linked data-quality findings with sampling disclosures |
+| Visualize | Histogram, box plot, bar, line, scatter, heatmap, correlation, and missingness charts; linked data/chart and chart/chart comparisons |
+| Save and export | Version-bound chart configurations; PNG, SVG, HTML, JSON, and inspectable Python plotting code |
+| Transform | Fixed validated operations, full-dataset impact previews, inspectable DuckDB SQL, separate approval, immutable output versions, undo/redo |
+| Discuss | Right-side Pi chat, incremental replies, persistent sessions and follow-ups, cancellation, provider/model selection |
+| Attach context | Dataset/profile/column/filter/chart metadata, explicitly approved text files, and selected safe metadata from prior transformation results |
+| Navigate | Resizable panels, command palette, keyboard navigation, themes, and responsive layouts |
 
-## All Packages
+Transformations include rename/cast/drop, row filters, missing-value handling, deduplication, category mapping, datetime extraction, scaling, encoding, and derived columns from validated expressions. They are application-defined operations, not arbitrary SQL or model-generated code execution.
 
-| Package | Description |
-|---------|-------------|
-| **[@earendil-works/pi-telemetry](packages/telemetry)** | Vendor-neutral telemetry contracts, reference adapter, conformance tests, and typed schemas |
-| **[@earendil-works/pi-ai](packages/ai)** | Unified multi-provider LLM API (OpenAI, Anthropic, Google, etc.) |
-| **[@earendil-works/pi-agent-core](packages/agent)** | Agent runtime with tool calling and state management |
-| **[@earendil-works/pi-coding-agent](packages/coding-agent)** | Interactive coding agent CLI |
-| **[@earendil-works/pi-tui](packages/tui)** | Terminal UI library with differential rendering |
+## Quick start
 
-For Slack/chat automation and workflows see [earendil-works/pi-chat](https://github.com/earendil-works/pi-chat).
+Requirements:
 
-## Permissions & Containerization
+- **Windows 10 or later, x64.** Analytical workers fail closed on unsupported platforms.
+- **Node.js 22.19.0 or newer** and npm. Check `node --version` before starting; older Node 22 versions cannot run this repository's TypeScript directly.
+- A modern browser. A provider API key is optional for local data tools and required for hosted AI chat.
 
-Pi does not include a built-in permission system for restricting filesystem, process, network, or credential access. By default, it runs with the permissions of the user and process that launched it.
-
-If you need stronger boundaries, containerize or sandbox Pi. See [packages/coding-agent/docs/containerization.md](packages/coding-agent/docs/containerization.md) for three patterns:
-
-- **Gondolin extension**: keep `pi` and provider auth on the host while routing built-in tools and `!` commands into a local Linux micro-VM.
-- **Plain Docker**: run the whole `pi` process in a local container for simple isolation.
-- **OpenShell**: run the whole `pi` process in a policy-controlled sandbox.
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines and [AGENTS.md](AGENTS.md) for project-specific rules (for both humans and agents).  Longer term plans for Pi can also be found in [RFCs](https://rfc.earendil.com/keyword/pi/).
-
-## Development
-
-```bash
-npm install --ignore-scripts  # Install all dependencies without running lifecycle scripts
-npm run build         # Refresh model data, then build all packages
-npm run build:offline # Rebuild using existing model data without network access
-npm run check         # Lint, format, and type check
-./test.sh            # Run tests (skips LLM-dependent tests without API keys)
-./pi-test.sh         # Run pi from sources (can be run from any directory)
-```
-
-## Local data workbench
-
-Requires **Windows 10 or later, x64, Node.js 22.19.0 or newer**, and the root workspace dependencies. Analytical processing fails closed on other platforms. Start from the repository root:
+From the repository root:
 
 ```bash
 npm install --ignore-scripts
 npm run dev:workbench
 ```
 
-Open `http://127.0.0.1:4310`. Optional launch settings:
+Open **http://127.0.0.1:4310**.
+
+To use a different port or storage directory:
 
 ```bash
 npm run dev:workbench -- --port 4311 --data-dir ./local-workbench-data
 ```
 
-The shell has project/dataset navigation, Data/Code/Visualize/Statistics/Models workspace tabs, and Assistant/Suggestions/Activity inspector tabs. Drag the separators or focus them and use Left/Right (Home/End for limits). Below 1100px the inspector moves below the workspace; below 700px all panels stack. Individual tables and tab bars scroll without widening the page.
-
-Use the Commands button or Ctrl+K (Command+K on macOS) for navigation, theme, and layout actions. Tab groups support Left/Right and Home/End. Escape closes the command palette and restores focus. Panel widths, selected tabs, and theme persist in browser storage for the same server address. Reset layout restores the default shell arrangement.
-
-Create a project with a description and default preview size, import UTF-8 CSV or Parquet up to 100,000,000 bytes, and inspect original values, native/basic column types, elementary profiles, and version provenance. Preview pages contain at most 500 rows and 8 MiB, including response metadata; wide rows produce shorter pages without skipping rows. Parquet integers/decimals remain exact text, and NULL stays distinct from an empty string. Import, profile, chart and fixed transformation operations are local; the assistant sends only explicitly reviewed metadata after approval, never attached dataset rows.
-
-Application metadata lives in SQLite under `~/.datapi/workbench`; original files and separate immutable DuckDB versions use generated paths. Imports stream to staging while hashing. Failed or cancelled imports publish no dataset; Retry import requests the original file again for a fresh upload. Duplicate hashes are identified only within the same project, without sharing dataset IDs or storage. Existing JSON-backed projects migrate on startup while retaining original files and legacy metadata; a failed migration stops startup with a safe error rather than discarding data.
-
-Ingestion limits: 512 columns, 1 MiB serialized record, 256 MiB decoded output, 16 MiB Parquet footer, and 64 MiB declared uncompressed row group. Fixed analytical workers use a Windows JobObject with a 1 GiB committed-memory cap, a five-minute deadline, and descendant cleanup. Each DuckDB instance has a 256 MiB buffer limit and 512 MiB spill limit; transformations use separate source and target instances, not one shared buffer/spill allowance. Derived database files have a separate 512 MiB limit. These limits can reject valid highly compressed datasets. Encrypted Parquet, INT96, nanosecond UTC timestamps and nanosecond times are explicitly unsupported. This resource boundary is **not** a filesystem/network sandbox and never accepts user code or arbitrary SQL.
-
-Choose **Run profile** for a cancellable, deterministic report; no LLM is involved. Search/select columns beside the active preview, or use **Statistics → Data Quality** for severity-filtered evidence and proposed actions. Profiles cache by project, dataset version, actual analytical artifact SHA-256, and profiler version. For an untransformed version, recomputing ingestion statistics creates a separate derived version and invalidates that profile identity. For a transformed version, **Recompute current profile** profiles the current immutable artifact instead of rereading the original upload or undoing transformations.
-
-Profiling inspects all rows when they fit, otherwise a deterministic systematic sample: at most 4,096 rows, 200,000 cells and 16 MiB serialized sample data. Ordering can bias the sample; sampled counts are not population estimates. Numeric arithmetic is explicitly approximate, including full scans; unsafe integers are excluded rather than rounded. Examples/top-value labels are redacted. Correlation covers the first 24 eligible numeric columns; reports retain at most 128 findings and disclose omitted work. Confidence values are heuristic scores, not probability guarantees. Profiles are capped at 4 MiB and use the existing worker deadline/memory limits.
-
-After **Run profile**, open **Visualize**, choose a recommendation or chart type, set the available X/Y/color/size/facet fields, aggregation, sorting and filters, then choose **Render chart**. Supported charts are histogram, box plot, bar, line, scatter, heatmap, correlation and missingness; model-result is an explicitly untrained placeholder. Compare data with a chart (select marks to highlight matching visible source rows), two independent charts, or two filtered variants with shared encodings. Comparison layout/specifications persist in browser storage; results require rendering again. Save, load, update, duplicate, rename or confirm deletion of chart configurations, up to 100 per dataset. Configurations are bound to the dataset version and cannot be rendered against a different current version. These actions never change original data or create a transformed dataset.
-
-Chart limits are separate from profiling limits: a deterministic sample of at most 4,096 rows, 200,000 cells and 16 MiB, projecting only referenced fields (including filter and matrix fields); at most 4,096 marks, 1,000 scatter points, 30 categories, 10 color groups and four facets. Correlation uses the first 12 numeric fields; missingness shows SQL NULLs in the first 24 fields, not empty strings. The linked table contains at most 100 filtered sample rows and 512 KiB of original values from referenced fields; some selected rows may be outside this table. Results are capped at 4 MiB. Comparison panes render sequentially through the existing bounded analytical worker; **Cancel render** stops unfinished work while retaining completed pane results.
-
-Filters and aggregates operate on the bounded sample, not on the whole dataset unless every row fits; sampled counts are not population estimates. The studio discloses sampling, omitted marks/rows, missing values and approximate arithmetic. Export PNG, SVG or HTML, or inspect/export the JSON specification with its frozen result and Python plotting code. Python reproduces frozen bounded aggregates/observations, not a source-data transformation, and is never executed by the application. Exports can contain selected bounded observations, category labels and other dataset values; review them before sharing.
-
-Open **Data → Transform** and choose one fixed operation: rename/cast/drop columns, filter rows, handle missing values (constant, mean, median or row removal), deduplicate, map categories, extract datetime components, standard/min-max scale, ordinal/one-hot encode, or derive a column from a validated expression tree. Select **Preview full-dataset impact**. Operations and exact affected-row, row-count, schema and NULL-count impact cover the whole current dataset, unlike sampled charts. The first at most 20 input and output rows are illustrative samples, **not an aligned row-by-row diff**. Inspect the specification, generated DuckDB SQL and warnings, check the exact-preview approval box, then choose **Apply approved transformation**. Changing parameters or dataset context clears approval; stale, expired or altered artifacts cannot be applied. **Cancel / discard preview** does not publish a version.
-
-Applying publishes the already-previewed immutable artifact and records its input/output versions, specification and engine provenance. Original uploads remain unchanged. **Undo** and **Redo** switch the active version without rewriting files; a new apply clears the redo path but retains prior versions and history. Active versions and history survive reload and restart. Existing chart configurations and assistant proposals remain version-bound; refresh the profile and review new proposals for the selected version.
-
-Transformation limits: 24 KiB specifications, 4 MiB impact reports, at most 512 output columns, 128 value-map entries or encoding categories, and derived expressions limited to 128 nodes and depth 16. At most four staged previews are retained across the local store, each expiring after ten minutes; draft expiry is restart-safe. Each dataset retains at most 100 versions and 100 transformation audit records within a 16 MiB audit budget; preview admission reserves room for its result and rejects work rather than pruning provenance. The existing worker deadline, memory, spill, record/decoded-output and artifact limits also apply. SQL NULL and empty strings remain distinct; choose the missing-value policy explicitly. Numeric conversions/arithmetic can use approximate double precision, while unchanged source text remains exact. The SQL is application-generated and inspect-only in the UI; neither arbitrary SQL nor generated Python/JavaScript is accepted for execution.
-
-After profiling, open **Assistant → Set up assistant / load history**. Choose a provider/model and configure its literal API key under **Provider credentials**. Keys stay in server memory, are cleared on restart, and are never saved in browser preferences or run history. Supported providers: Anthropic, OpenAI, Google, Mistral, xAI, Groq, OpenRouter and Cerebras. Ambient Pi/environment credentials, OAuth and custom endpoints are deliberately not loaded. “Configured” means a key was supplied, not that it was authenticated.
-
-Write an independent request, choose up to 32 fields (initially the first 24), and select **Review exact payload**. Current chart filter fields and literal values are additionally disclosed. Inspect the exact system/user messages, recipient, profile evidence, dataset version and artifact hash; then check the approval box and select **Approve and send**. Names, filters, statistics and your request may contain sensitive information. No rows, cell samples, storage paths, previous turns or artifact contents are attached. Changing the request, provider, fields or dataset context invalidates approval.
-
-Runs retain validated suggestions, evidence references, model-reported confidence, status, token/cache usage, latency and safe errors. Evidence-linked conclusions remain AI inferences, not verified facts; uncited claims are hypotheses requiring validation. Malformed output is rejected as a whole, without automatic repair or retry. Accept/reject records a review decision only. For chart proposals, **Accept → Preview chart locally → Apply** saves only a version-bound chart configuration. **Revert chart** deletes that owned configuration only if it remains unchanged. For validated transformation proposals, **Accept → Review transformation** only fills the local Transform controls; it does not preview or apply anything. The same full-dataset preview and separate explicit approval are required before data changes. Transform history owns applied versions and undo/redo; the assistant suggestion remains a review record. Original data and run history remain intact. Generated code is inspect-only.
-
-Assistant limits: one generation at a time, five-minute deadline, 96 KiB total system/user payload, 128 KiB output and 12 suggestions per response. At most ten single-use approvals and eight bounded chart previews remain in memory for ten minutes. SQLite retains up to 100 runs per dataset, pruning oldest terminal runs; interrupted runs recover as failed. Each request uses a fresh public Pi SDK session with no tools, extensions, skills, ambient context or conversation history. Its fixed subprocess uses sanitized environment variables and a 256 MiB JavaScript heap limit, not an OS sandbox or native-memory quota. Model discovery uses the offline built-in catalog; missing generated catalog data requires `npm run hydrate:model-data` during setup, not an implicit network refresh.
-
-Prompt 7 fixed, validated transformations are implemented. Arbitrary generated-code execution and model training remain disabled. The assistant still uses the independent, fresh-session Prompt 6 behavior described above. The [Pi conversational-session reuse plan](docs/data-science-workbench-plan.md#conversational-assistant-reuse-plan-not-implemented) specifies normal Send and follow-ups within a session-scoped sharing permission, confirmation only for expanded sharing or a new provider, and separate local preview/Apply for transformations. It reuses Pi rather than building a standalone chat engine; this chat behavior is planned, not implemented. Prompt 8 is on hold; later stages require separate approval.
-
-Focused checks (from the repository root; no full build or live provider tests):
+If the offline provider model catalog is missing, hydrate it explicitly:
 
 ```bash
-node --test packages/workbench/test/browser/shell.test.ts packages/workbench/test/browser/ingestion.test.ts
-node --test packages/workbench/test/profiler.test.ts packages/workbench/test/storage.test.ts packages/workbench/test/server.test.ts packages/workbench/test/legacy-migration.test.ts
-node --test packages/workbench/test/format-validation.test.ts packages/workbench/test/analytical.test.ts packages/workbench/test/analytical-process.test.ts
-node --test packages/workbench/test/dataset-profiler.test.ts packages/workbench/test/profile-worker.test.ts packages/workbench/test/dataset-profile-storage.test.ts packages/workbench/test/browser/profile.test.ts
-node --test packages/workbench/test/chart-spec.test.ts packages/workbench/test/chart-engine.test.ts packages/workbench/test/chart-worker.test.ts packages/workbench/test/chart-storage.test.ts
-node --test packages/workbench/test/browser/chart-renderer.test.ts packages/workbench/test/browser/chart-studio.test.ts
-node --test packages/workbench/test/assistant-context.test.ts packages/workbench/test/assistant-driver.test.ts packages/workbench/test/assistant-service.test.ts packages/workbench/test/assistant-storage.test.ts packages/workbench/test/assistant-server.test.ts packages/workbench/test/browser/assistant.test.ts
-node --test packages/workbench/test/transform-spec.test.ts packages/workbench/test/transform-worker.test.ts packages/workbench/test/transform-storage.test.ts packages/workbench/test/transform-server.test.ts packages/workbench/test/browser/transform.test.ts
-npm run typecheck --workspace=@earendil-works/pi-workbench
+npm run hydrate:model-data
+```
+
+Catalog hydration downloads model metadata, not datasets. A full monorepo build is not required to start the workbench.
+
+### First workflow
+
+1. Create a project and import a CSV or Parquet file.
+2. Inspect the preview and run a profile. Review sampling and approximation notices.
+3. Open **Visualize** to configure, render, compare, and save charts.
+4. Open **Data → Transform** to preview a fixed operation. Inspect its SQL and impact, approve that exact preview, then apply it.
+5. Open **Chat → Connect a provider**, enter a literal API key, and select a model. Review **Context to share**, then send a question.
+6. Optionally attach text files or select prior transformation results before the first message. File contents require explicit consent. Follow-ups reuse the saved context; choose **New chat** to change it.
+
+Use **Commands** or **Ctrl+K** for navigation and layout actions. Panel separators and tab groups support keyboard navigation. On narrow screens, the side panels stack below the workspace rather than compressing it into an unusable layout.
+
+## Privacy and execution boundaries
+
+**Local processing does not mean AI chat is offline.** Imports, profiles, charts, and transformations run locally. Chat sends your messages, the disclosed metadata, and any explicitly approved file contents to the selected provider. Column names, filters, statistics, and file contents can be sensitive.
+
+- Dataset rows and cell samples are **not automatically attached** to chat. A file you choose or text you paste can still contain sensitive data; inspect it before sending.
+- Text attachments support UTF-8 `.py`, `.sql`, `.txt`, `.md`, and `.json`: at most **8 files, 8 KiB each, 32 KiB total**. They are reference text and are never executed.
+- Saved chat context includes exact attachment contents, UTF-8 byte lengths, and SHA-256 hashes. Reloading or following up does not silently substitute current files or a newer dataset version.
+- Selected transformation results share only scoped IDs, status, version references, operation kind, timestamps, and numeric impact counts—not SQL, preview cells, or raw errors. A preview is not an applied change.
+- Pi sessions have no filesystem, shell, Python, or application execution tools. Chat cannot apply transformations or approve its own actions.
+- Manual transformations require a separate, exact-preview approval. Original uploads remain unchanged; undo/redo switches immutable versions.
+- Chart exports can contain bounded dataset values and category labels. Generated Python reproduces the exported chart data; the application does not execute it.
+
+### Credentials and local storage
+
+The default data root is `~/.datapi/workbench`. SQLite stores application metadata; original uploads, immutable DuckDB versions, and Pi session files remain local. Chat keys use Pi credential storage at `<data-dir>/pi/auth.json` and persist across restarts. This is a local credential file, **not an encrypted secret vault**; protect the data directory and its backups.
+
+Chat accepts explicit literal API keys for Anthropic, OpenAI, Google, Mistral, xAI, Groq, OpenRouter, and Cerebras. It does not automatically reuse the Pi CLI login, load environment-key templates, execute credential commands, or provide an OAuth login. A configured key is not proof of provider authorization or model entitlement.
+
+The server binds to loopback and checks local request authority, origin, and a per-launch token. It is a single-user local application, not a service to expose publicly. Worker process separation and resource limits are **not a filesystem/network sandbox**.
+
+## Reproducibility and limits
+
+- Imports: up to **100,000,000 bytes**, 512 columns, 1 MiB serialized records, and 256 MiB decoded output. Additional Parquet footer/row-group limits can reject valid highly compressed files.
+- Previews: at most **500 rows and 8 MiB** per response; wide records can produce shorter pages.
+- Profiles and charts: bounded deterministic samples, up to **4,096 rows, 200,000 cells, and 16 MiB**, with feature-specific mark/column limits. Sampled counts are not population estimates; numeric arithmetic can be approximate.
+- Transformations: full-dataset computation with exact row/schema/NULL impact and at most 20 illustrative input/output preview rows—not an aligned row-by-row diff. Previews expire after ten minutes; applied versions and their operation records persist.
+- Analytical workers: a **five-minute deadline** and **1 GiB Windows JobObject committed-memory limit**, plus DuckDB buffer/spill and artifact limits. These are resource bounds, not permission isolation for untrusted code.
+- Chat: **96 KiB** initial system/context payload, **16 KiB** messages, bounded transcript/output, and a five-minute response deadline. Starting a chat also requires its initial request to fit the 4,000-character selection limit. Larger requests fail explicitly instead of being silently truncated.
+
+Profiles, charts, and transformations retain version identity and disclose limitations. AI explanations remain inferences; they do not replace observed evidence or validate a transformation.
+
+## Architecture
+
+```text
+Browser workbench — TypeScript, native DOM/CSS
+        |
+        | local HTTP commands and streamed text events
+        v
+Node.js workbench host — projects, context, approvals, persistence
+        |                              |
+        v                              v
+Bounded analytical workers        Pi SDK subprocess
+DuckDB + fixed operations         streamed, read-only conversations
+        |                              |
+        v                              v
+Immutable dataset versions        Saved Pi session history
+        \______________________________/
+                  Local data root
+```
+
+The web application lives in [`packages/workbench`](packages/workbench). It reuses the repository's npm workspaces, TypeScript tooling, esbuild, and Pi SDK rather than adding a separate agent engine or frontend framework. SQLite application records and Pi conversation history have distinct roles. The SDK reopens the saved Pi session for subsequent turns; a worker is not kept alive indefinitely.
+
+## Development and verification
+
+Run from the repository root with a supported Node version:
+
+```bash
+node --test packages/workbench/test/assistant-context.test.ts packages/workbench/test/assistant-storage.test.ts packages/workbench/test/assistant-driver.test.ts packages/workbench/test/conversation-driver.test.ts packages/workbench/test/conversation-http.test.ts packages/workbench/test/browser/conversation.test.ts
 npm run check
 ```
 
-Tests cover shell interaction, ingestion controls, CSV/Parquet values, pagination, cancellation/retry, migration, project isolation, real Windows worker resource/lifecycle boundaries, deterministic charts, version-bound configuration persistence, comparisons, export safety, assistant approval/privacy/lifecycle behavior, and full-dataset transformations with immutable publication, stale-preview rejection and undo/redo. Assistant SDK tests use its deterministic faux provider, not paid API calls. Historical stage results and the current Prompt 7 evidence are recorded in the [implementation plan](docs/data-science-workbench-plan.md#prompt-7-current-checkpoint). `npm run check` checks Node code with the root configuration and browser code with the DOM configuration; it does not run tests.
+These focused tests cover context validation, attachment consent and persistence, SDK/subprocess streaming, cancellation, protocol errors, HTTP body limits, and restart/follow-up behavior. They use Pi's deterministic local test provider, not paid API calls. `npm run check` formats/lints, checks dependency/import/lock consistency, typechecks Node/browser code, and checks browser bundling; it does not run tests.
 
-## Building standalone binaries from release source
+The attachment/chat checkpoint was also exercised in a real browser: partial replies before completion, explicit file consent, frozen references after reload, follow-ups, cancellation, and desktop/mobile layout. Hosted-provider inference has **not** been verified by that local-provider smoke test.
 
-GitHub releases include a versioned source archive covered by the release's `SHA256SUMS` file. Extract it and run the same build script used for the official standalone binaries:
+See [AGENTS.md](AGENTS.md) for development rules, [CONTRIBUTING.md](CONTRIBUTING.md) for contribution policy, and the [implementation plan](docs/data-science-workbench-plan.md) for historical stages and future direction.
 
-```bash
-VERSION="<release-version>"
-tar -xzf "pi-${VERSION}-source.tar.gz"
-cd "pi-${VERSION}"
-./scripts/build-binaries.sh --offline-model-data --platform linux-x64 --out "$PWD/out"
-```
+## What is next
 
-The source archive includes the generated provider model data used for the release. `--offline-model-data` builds with that snapshot instead of refreshing it from live provider catalogs. The script still installs dependencies, builds the monorepo, compiles the Bun executable, and stages its runtime assets. Package maintainers who provide dependencies separately can pass `--skip-install --skip-deps`.
+The next bounded feature is to connect **one validated local operation to the Pi tool loop**, with a visible proposal, explicit user approval, and a durable result/audit record. Read-only chat and existing manual transformations are not that workflow yet.
 
-## Supply-chain hardening
+Arbitrary generated-code execution requires a separately verified OS sandbox. Model training, reports, hosted identity, multi-user authorization, and deployment remain later work. The Models view does not train a model today.
 
-We treat npm dependency changes as reviewed code changes.
+## Built on Pi
 
-- Direct external dependencies are pinned to exact versions. Internal workspace packages remain version-ranged.
-- `.npmrc` sets `save-exact=true` and `min-release-age=2` to avoid same-day dependency releases during npm resolution.
-- `package-lock.json` is the dependency ground truth. Pre-commit blocks accidental lockfile commits unless `PI_ALLOW_LOCKFILE_CHANGE=1` is set.
-- `npm run check` verifies pinned direct deps, native TypeScript import compatibility, and the generated coding-agent shrinkwrap.
-- The published CLI package includes `packages/coding-agent/npm-shrinkwrap.json`, generated from the root lockfile, to pin transitive deps for npm users.
-- Release smoke tests use `npm run release:local` to build, pack, and create isolated npm and Bun installs outside the repo before tagging a release.
-- Local release installs, documented npm installs, and `pi update --self` use `--ignore-scripts` where supported.
-- CI installs with `npm ci --ignore-scripts`, and a scheduled GitHub workflow runs `npm audit --omit=dev` plus `npm audit signatures --omit=dev`.
-- Shrinkwrap generation has an explicit allowlist for dependency lifecycle scripts; new lifecycle-script deps fail checks until reviewed.
+Data Pi builds on the [Pi agent harness](https://pi.dev). This repository also contains the upstream libraries and CLI:
 
-## Share your OSS coding agent sessions
+- [`packages/coding-agent`](packages/coding-agent): Pi CLI, public SDK, and session lifecycle.
+- [`packages/ai`](packages/ai): model/provider APIs and streaming.
+- [`packages/agent`](packages/agent): agent runtime and tool execution.
+- [`packages/tui`](packages/tui): terminal UI library.
+- [`packages/telemetry`](packages/telemetry): telemetry contracts and adapters.
 
-If you use Pi or other coding agents for open source work, please share your sessions.
-
-Public OSS session data helps improve coding agents with real-world tasks, tool use, failures, and fixes instead of toy benchmarks.
-
-For the full explanation, see [this post on X](https://x.com/badlogicgames/status/2037811643774652911).
-
-To publish sessions, use [`badlogic/pi-share-hf`](https://github.com/badlogic/pi-share-hf). Read its README.md for setup instructions. All you need is a Hugging Face account, the Hugging Face CLI, and `pi-share-hf`.
-
-You can also watch [this video](https://x.com/badlogicgames/status/2041151967695634619), where I show how I publish my `pi-mono` sessions.
-
-I regularly publish my own `pi-mono` work sessions here:
-
-- [badlogicgames/pi-mono on Hugging Face](https://huggingface.co/datasets/badlogicgames/pi-mono)
+Those packages retain their own APIs and documentation. Their capabilities do not automatically become available to the browser workbench.
 
 ## License
 
-MIT
-
-<p align="center">
-  <a href="https://pi.dev">pi.dev</a> domain graciously donated by
-  <br /><br />
-  <a href="https://exe.dev"><img src="packages/coding-agent/docs/images/exy.png" alt="Exy mascot" width="48" /><br />exe.dev</a>
-</p>
+MIT. See [LICENSE](LICENSE).

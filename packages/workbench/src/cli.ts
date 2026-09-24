@@ -23,7 +23,7 @@ if (values.help) {
 		const app = await startWorkbench({ port, dataDir: resolve(values["data-dir"]) });
 		console.log(`Workbench ready at ${app.url}`);
 		console.log(
-			"Local files. Chat sends only the selected read-only metadata scope to its chosen provider; never dataset rows.",
+			"Datasets stay local. Chat shares read-only metadata, messages and explicitly approved text files with its chosen provider; no automatic row samples or file execution.",
 		);
 		const stop = () => {
 			void app.close().catch(() => {

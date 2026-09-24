@@ -1,11 +1,14 @@
 import type { ChartFilter, ChartResult, ChartSpec } from "./chart-contracts.ts";
 import type { DatasetColumn } from "./contracts.ts";
-import type { TransformSpec } from "./transform-contracts.ts";
+import type { TransformRecord, TransformSpec } from "./transform-contracts.ts";
 
 export const ASSISTANT_CONTEXT_BYTES = 96 * 1024;
 export const ASSISTANT_OUTPUT_BYTES = 128 * 1024;
 export const ASSISTANT_MAX_SUGGESTIONS = 12;
 export const ASSISTANT_TIMEOUT_MS = 5 * 60_000;
+export const ASSISTANT_ATTACHMENT_MAX_FILES = 8;
+export const ASSISTANT_ATTACHMENT_FILE_BYTES = 8192;
+export const ASSISTANT_ATTACHMENT_TOTAL_BYTES = 32768;
 export const SUGGESTION_CATEGORIES = [
 	"data-quality",
 	"exploration",
@@ -26,11 +29,32 @@ export interface AssistantModels {
 	models: AssistantModel[];
 	guidance: string;
 }
-export interface AssistantAttachment {
+export interface AssistantAttachmentInput {
 	name: string;
 	mediaType: string;
 	content: string;
+}
+export interface AssistantAttachment extends AssistantAttachmentInput {
 	byteLength: number;
+	sha256: string;
+}
+export interface AssistantExecutionReference {
+	id: string;
+	projectId: string;
+	datasetId: string;
+	state: TransformRecord["state"];
+	inputVersionId: string;
+	outputVersionId: string | null;
+	kind: TransformSpec["operation"]["kind"];
+	createdAt: string;
+	completedAt: string | null;
+	impact: {
+		inputRows?: number;
+		outputRows?: number;
+		affectedRows?: number;
+		inputColumnCount?: number;
+		outputColumnCount?: number;
+	} | null;
 }
 export interface AssistantSelection {
 	datasetVersionId: string;
@@ -39,7 +63,8 @@ export interface AssistantSelection {
 	request: string;
 	provider: string;
 	modelId: string;
-	attachments: AssistantAttachment[];
+	attachments?: AssistantAttachmentInput[];
+	executionIds?: string[];
 }
 export interface AssistantEvidence {
 	id: string;
@@ -66,7 +91,8 @@ export interface AssistantContext {
 	filters: ChartFilter[];
 	evidence: AssistantEvidence[];
 	artifacts: { id: string; name: string; type: string; datasetVersionId: string }[];
-	attachedFiles: AssistantAttachment[];
+	attachedFiles?: AssistantAttachment[];
+	executionResults?: AssistantExecutionReference[];
 	limitations: string[];
 	rowsIncluded: false;
 }

@@ -12,7 +12,7 @@
 		<a class="skip-link" href="#workspace">Skip to workspace</a>
 		<header class="app-header">
 			<a class="brand" href="/" aria-label="Data Pi home"><span class="brand-mark" aria-hidden="true">dp</span>data pi<span class="brand-caption">/ workbench</span></a>
-			<div class="privacy" role="status"><span class="status-dot" aria-hidden="true"></span><strong id="assistant-privacy-state">Private by default</strong><span id="assistant-privacy-detail" class="privacy-detail">Chat shares only the selected read-only dataset context</span></div>
+			<div class="privacy" role="status"><span class="status-dot" aria-hidden="true"></span><strong id="assistant-privacy-state">Private by default</strong><span id="assistant-privacy-detail" class="privacy-detail">Chat shares metadata and messages; optional file contents require consent</span></div>
 			<nav class="header-actions" aria-label="Workbench controls">
 				<button id="command-trigger" class="button command-trigger" type="button" aria-haspopup="dialog" aria-controls="command-dialog">Commands</button>
 				<button id="theme-toggle" class="button button-quiet" type="button">Light theme</button>
@@ -44,7 +44,7 @@
 					<button id="retry-datasets" class="button button-quiet sidebar-retry" type="button" hidden>Retry loading datasets</button>
 					<ul id="dataset-list" class="dataset-list"></ul>
 				</section>
-				<div class="sidebar-footer"><span class="eyebrow">YOUR MACHINE. YOUR DATA.</span><p>Original files and deterministic profiles stay in this local workbench.</p></div>
+				<div class="sidebar-footer"><span class="eyebrow">YOUR MACHINE. YOUR DATA.</span><p>Datasets stay local. Chat shares metadata, messages and explicitly approved text files with your chosen provider.</p></div>
 			</aside>
 			<div id="left-splitter" class="panel-splitter" role="separator" aria-orientation="vertical" aria-label="Resize project panel" aria-controls="projects-panel" aria-valuemin="180" aria-valuemax="400" aria-valuenow="240" tabindex="0"></div>
 			<main id="workspace" class="workspace" tabindex="-1">

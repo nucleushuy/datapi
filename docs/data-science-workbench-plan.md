@@ -1,5 +1,17 @@
 # Data-science workbench implementation plan
 
+## Current checkpoint — 2026-09-24
+
+The stage descriptions below are historical design/checkpoint records, not an up-to-date feature inventory. The [root README](../README.md) is the current project introduction and usage guide.
+
+- Right-side read-only Pi chat now streams text, persists Pi sessions and frozen context, supports follow-ups and cancellation, and restores sessions after reload/restart. Each turn reopens its saved SDK session in a bounded subprocess; this is not the retained-worker design proposed below.
+- Frozen context includes disclosed dataset/profile/columns/filters/chart metadata, optional explicitly approved UTF-8 text files with byte lengths and SHA-256 hashes, and selected safe metadata/counts from scoped transformation records. Files are never executed; dataset rows are not attached automatically. Existing absent attachment fields and saved context hashes remain unchanged.
+- Chat uses explicit literal API keys persisted in the workbench's own Pi credential file, not the memory-only credentials of the historical suggestion implementation. No automatic CLI login reuse, OAuth, ambient credential templates, or command execution is enabled.
+- Verification: 72 focused tests across six files passed across the final runs, including the real SDK, subprocess protocol, HTTP streaming/restart, attachment persistence, and browser contracts. The final `npm run check` passed. Real browser smoke covered file consent, incremental text before completion, frozen references after reload, follow-ups, cancellation, and 1440px/390px layouts. No paid provider calls were made; hosted inference remains unverified.
+- Agent proposal/execution tools, approval/rejection in the Pi tool loop, and durable tool-event audit history are not implemented. The broad conversational-agent plan below is therefore only partially implemented, not complete. Arbitrary generated code and model training remain disabled.
+
+## Historical stage plan
+
 Status: architecture and Prompts 2–7 approved and implemented. Shell, ingestion, profiling, visualization, read-only Pi assistant suggestions and fixed reproducible transformations are complete. Prompt 8 is on hold. Pi conversational-session research and the reuse plan below are complete; the user permitted a plan-first checkpoint before later chatbox implementation.
 
 ## 1. Scope and current checkpoint

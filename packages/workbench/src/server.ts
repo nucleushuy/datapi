@@ -3,8 +3,10 @@ import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
+import type { AssistantDriver } from "./assistant-contracts.ts";
 import { PiAssistantDriver } from "./assistant-driver.ts";
 import { MAX_DECODED_BYTES, MAX_PREVIEW_ROWS, MAX_UPLOAD_BYTES, PAGE_SIZE, type ProjectSettings } from "./contracts.ts";
+import type { ConversationDriver } from "./conversation-contracts.ts";
 import { PiConversationDriver } from "./conversation-driver.ts";
 import { ConversationService } from "./conversation-service.ts";
 import { WorkbenchError, WorkbenchStore } from "./storage.ts";
@@ -12,6 +14,8 @@ import { WorkbenchError, WorkbenchStore } from "./storage.ts";
 export interface WorkbenchOptions {
 	dataDir: string;
 	port?: number;
+	conversationDriver?: ConversationDriver & { authorizedProviders(): Promise<readonly string[]> };
+	modelCatalog?: Pick<AssistantDriver, "models"> & { close(): Promise<void> };
 }
 
 export interface WorkbenchApplication {
@@ -27,7 +31,7 @@ function ndjson(response: ServerResponse, value: unknown): void {
 	response.write(`${JSON.stringify(value)}\n`);
 }
 
-async function readMetadata(request: IncomingMessage): Promise<Record<string, unknown>> {
+async function readMetadata(request: IncomingMessage, maxBytes = 32 * 1024): Promise<Record<string, unknown>> {
 	if (request.headers["content-type"]?.split(";")[0].trim() !== "application/json") {
 		throw new WorkbenchError(415, "Send a JSON request.");
 	}
@@ -35,7 +39,7 @@ async function readMetadata(request: IncomingMessage): Promise<Record<string, un
 	let size = 0;
 	for await (const chunk of request.iterator({ destroyOnReturn: false })) {
 		size += chunk.length;
-		if (size > 32 * 1024) throw new WorkbenchError(413, "Request is too large.");
+		if (size > maxBytes) throw new WorkbenchError(413, "Request is too large.");
 		chunks.push(chunk);
 	}
 	let value: unknown;
@@ -75,8 +79,8 @@ export async function startWorkbench(options: WorkbenchOptions): Promise<Workben
 	};
 	const store = new WorkbenchStore(options.dataDir);
 	await store.init();
-	const modelCatalog = new PiAssistantDriver();
-	const conversationDriver = new PiConversationDriver(options.dataDir);
+	const modelCatalog = options.modelCatalog ?? new PiAssistantDriver();
+	const conversationDriver = options.conversationDriver ?? new PiConversationDriver(options.dataDir);
 	const conversations = new ConversationService(store, conversationDriver);
 	const token = randomBytes(32).toString("hex");
 	const tokenBytes = Buffer.from(token);
@@ -297,7 +301,11 @@ export async function startWorkbench(options: WorkbenchOptions): Promise<Workben
 						return;
 					}
 					if (parts.length === 6 && method === "POST") {
-						json(response, 201, await conversations.create(projectId, datasetId, await readMetadata(request)));
+						json(
+							response,
+							201,
+							await conversations.create(projectId, datasetId, await readMetadata(request, 256 * 1024)),
+						);
 						return;
 					}
 					if (conversationId && parts.length === 7 && method === "GET") {

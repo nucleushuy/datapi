@@ -1,7 +1,10 @@
 import {
+	ASSISTANT_ATTACHMENT_FILE_BYTES,
+	ASSISTANT_ATTACHMENT_MAX_FILES,
+	ASSISTANT_ATTACHMENT_TOTAL_BYTES,
 	ASSISTANT_MAX_SUGGESTIONS,
 	ASSISTANT_OUTPUT_BYTES,
-	type AssistantAttachment,
+	type AssistantAttachmentInput,
 	type AssistantContext,
 	type AssistantOutput,
 	type AssistantSelection,
@@ -16,7 +19,7 @@ import type { TransformExpression } from "./transform-contracts.ts";
 import { parseTransformSpec } from "./transform-spec.ts";
 
 const SELECTION_KEYS = ["datasetVersionId", "selectedColumns", "filters", "request", "provider", "modelId"];
-const ATTACHMENT_SELECTION_KEYS = [...SELECTION_KEYS, "attachments"];
+const OPTIONAL_SELECTION_KEYS = ["attachments", "executionIds"];
 const SUGGESTION_KEYS = [
 	"id",
 	"category",
@@ -37,6 +40,18 @@ function objectWithKeys(value: unknown, keys: readonly string[]): value is Recor
 		(prototype === Object.prototype || prototype === null) &&
 		Reflect.ownKeys(value).length === keys.length &&
 		keys.every((key) => Object.hasOwn(value, key))
+	);
+}
+
+function selectionObject(value: unknown): value is Record<string, unknown> {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+	const prototype = Object.getPrototypeOf(value);
+	return (
+		(prototype === Object.prototype || prototype === null) &&
+		SELECTION_KEYS.every((key) => Object.hasOwn(value, key)) &&
+		Reflect.ownKeys(value).every(
+			(key) => typeof key === "string" && (SELECTION_KEYS.includes(key) || OPTIONAL_SELECTION_KEYS.includes(key)),
+		)
 	);
 }
 
@@ -66,10 +81,7 @@ function expressionUsesDeclaredColumns(expression: TransformExpression, columns:
 
 /** Keep the request and authorized filter values verbatim; only column order is canonicalized. */
 export function parseAssistantSelection(value: unknown, dataset: Dataset): AssistantSelection {
-	requireInput(
-		objectWithKeys(value, SELECTION_KEYS) || objectWithKeys(value, ATTACHMENT_SELECTION_KEYS),
-		"Provide only the required assistant selection fields.",
-	);
+	requireInput(selectionObject(value), "Provide only the required assistant selection fields.");
 	requireInput(
 		value.datasetVersionId === dataset.currentVersionId,
 		"The dataset version changed. Prepare a new assistant request.",
@@ -103,37 +115,50 @@ export function parseAssistantSelection(value: unknown, dataset: Dataset): Assis
 		throw new WorkbenchError(400, "Assistant filters must be at most 8 valid current-dataset chart filters.");
 	}
 	const selected = new Set(value.selectedColumns);
-	const attachments: AssistantAttachment[] = Array.isArray(value.attachments)
-		? value.attachments.map((attachment) => {
-				requireInput(
-					typeof attachment === "object" &&
-						attachment !== null &&
-						!Array.isArray(attachment) &&
-						Object.keys(attachment).length === 3 &&
-						typeof attachment.name === "string" &&
-						attachment.name.length > 0 &&
-						attachment.name.length <= 256 &&
-						!/[\u0000-\u001f\u007f]/u.test(attachment.name) &&
-						typeof attachment.mediaType === "string" &&
-						attachment.mediaType.length > 0 &&
-						attachment.mediaType.length <= 128 &&
-						typeof attachment.content === "string" &&
-						Buffer.byteLength(attachment.content) <= 8 * 1024,
-					"Attach at most eight text files of 8 KiB each.",
-				);
-				return {
-					name: attachment.name,
-					mediaType: attachment.mediaType,
-					content: attachment.content,
-					byteLength: Buffer.byteLength(attachment.content),
-				};
-			})
-		: [];
-	requireInput(
-		attachments.length <= 8 &&
-			Buffer.byteLength(attachments.map((attachment) => attachment.content).join("")) <= 32 * 1024,
-		"Attach at most eight text files totaling 32 KiB.",
-	);
+	let attachments: AssistantAttachmentInput[] | undefined;
+	if (Object.hasOwn(value, "attachments")) {
+		requireInput(
+			Array.isArray(value.attachments) && value.attachments.length <= ASSISTANT_ATTACHMENT_MAX_FILES,
+			"Attach at most eight text files of 8 KiB each, totaling 32 KiB.",
+		);
+		attachments = [];
+		let totalBytes = 0;
+		for (const attachment of value.attachments) {
+			requireInput(
+				objectWithKeys(attachment, ["name", "mediaType", "content"]) &&
+					text(attachment.name, 256) &&
+					attachment.name === attachment.name.trim() &&
+					!/^[. ]|[. ]$|[\\/:*?"<>|\u0000-\u001f\u007f-\u009f\ud800-\udfff]/u.test(attachment.name) &&
+					!/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(attachment.name) &&
+					/\.(?:py|sql|txt|md|json)$/iu.test(attachment.name) &&
+					attachment.mediaType === "text/plain" &&
+					typeof attachment.content === "string" &&
+					!/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\ud800-\udfff]/u.test(attachment.content),
+				"Attach only UTF-8 .py, .sql, .txt, .md or .json text files with safe basenames and text/plain media type.",
+			);
+			const byteLength = Buffer.byteLength(attachment.content, "utf8");
+			totalBytes += byteLength;
+			requireInput(
+				byteLength <= ASSISTANT_ATTACHMENT_FILE_BYTES && totalBytes <= ASSISTANT_ATTACHMENT_TOTAL_BYTES,
+				"Attach at most eight text files of 8 KiB each, totaling 32 KiB.",
+			);
+			attachments.push({ name: attachment.name, mediaType: attachment.mediaType, content: attachment.content });
+		}
+	}
+	let executionIds: string[] | undefined;
+	if (Object.hasOwn(value, "executionIds")) {
+		requireInput(
+			Array.isArray(value.executionIds) &&
+				value.executionIds.length <= 8 &&
+				!value.executionIds.includes(undefined) &&
+				value.executionIds.every(
+					(id: unknown) => typeof id === "string" && /^[a-zA-Z0-9_-]{1,80}$(?![\s\S])/u.test(id),
+				) &&
+				new Set(value.executionIds).size === value.executionIds.length,
+			"Select at most eight distinct controlled-operation results from this dataset.",
+		);
+		executionIds = [...value.executionIds];
+	}
 	return {
 		datasetVersionId: dataset.currentVersionId,
 		selectedColumns: dataset.schema.filter((column) => selected.has(column.index)).map((column) => column.index),
@@ -141,7 +166,8 @@ export function parseAssistantSelection(value: unknown, dataset: Dataset): Assis
 		request: value.request,
 		provider: value.provider,
 		modelId: value.modelId,
-		attachments,
+		...(attachments === undefined ? {} : { attachments }),
+		...(executionIds === undefined ? {} : { executionIds }),
 	};
 }
 

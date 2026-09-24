@@ -20,6 +20,7 @@ type Store = Pick<
 	| "getDataset"
 	| "getProfile"
 	| "listCharts"
+	| "transformHistory"
 	| "conversations"
 	| "conversation"
 	| "putConversation"
@@ -69,7 +70,9 @@ export class ConversationService {
 			profile,
 			await this.#store.listCharts(projectId, datasetId),
 			selection,
+			selection.executionIds?.length ? (await this.#store.transformHistory(projectId, datasetId)).records : [],
 		);
+		buildConversationPayload(context, selection.request);
 		const now = new Date().toISOString();
 		const conversation: Conversation = {
 			id: randomUUID(),
@@ -158,6 +161,8 @@ export class ConversationService {
 				409,
 				"This conversation is attached to an older dataset version. Start a new conversation to share the current version.",
 			);
+		const payload = buildConversationPayload(conversation.scope.context, message.trim());
+		if (conversation.sessionFile) payload.user = message.trim();
 		if (conversation.title === "New chat") conversation.title = message.trim().slice(0, 120);
 		const controller = new AbortController();
 		this.#active.set(id, controller);
@@ -174,8 +179,6 @@ export class ConversationService {
 		conversation.error = null;
 		conversation.updatedAt = now;
 		await this.#store.putConversation(conversation);
-		const payload = buildConversationPayload(conversation.scope.context, message.trim());
-		if (conversation.sessionFile) payload.user = message.trim();
 		const buffer: ConversationEvent[] = [];
 		this.#events.set(id, buffer);
 		const emit = (event: ConversationEvent): void => {

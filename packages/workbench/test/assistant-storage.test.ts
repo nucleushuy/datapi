@@ -6,7 +6,8 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { type TestContext, test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
-import type { AssistantRun, AssistantSuggestion } from "../src/assistant-contracts.ts";
+import { prepareAssistantContext } from "../src/assistant-context.ts";
+import { ASSISTANT_CONTEXT_BYTES, type AssistantRun, type AssistantSuggestion } from "../src/assistant-contracts.ts";
 import { defaultChartSpec } from "../src/chart-spec.ts";
 import type { Dataset, ImportJob, Project } from "../src/contracts.ts";
 import type { ConversationDriver } from "../src/conversation-contracts.ts";
@@ -371,8 +372,15 @@ test("Pi conversations persist a frozen scope and relay streamed deltas", { time
 	const { state, project, dataset } = await fixture(context);
 	const profiling = await state.store.profile(project.id, dataset.id);
 	assert.equal((await waitJob(state.store, project.id, profiling.id)).state, "completed");
+	const preview = await state.store.previewTransform(project.id, dataset.id, {
+		version: 1,
+		datasetVersionId: dataset.currentVersionId,
+		operation: { kind: "filter", column: 0, operator: "eq", comparison: "text", value: "a" },
+	});
+	const inputs: Parameters<ConversationDriver["chat"]>[0][] = [];
 	const driver: ConversationDriver = {
 		async chat(input, onEvent) {
+			inputs.push(structuredClone(input));
 			onEvent({ type: "text", delta: "Pi " });
 			onEvent({ type: "text", delta: "streams." });
 			return {
@@ -387,6 +395,9 @@ test("Pi conversations persist a frozen scope and relay streamed deltas", { time
 	};
 	const service = new ConversationService(state.store, driver);
 	context.after(() => service.close());
+	const attachments = [
+		{ name: "analysis.sql", mediaType: "text/plain", content: '-- reference only\nSELECT "界";\n' },
+	];
 	const conversation = await service.create(project.id, dataset.id, {
 		datasetVersionId: dataset.currentVersionId,
 		selectedColumns: [0, 1],
@@ -394,7 +405,39 @@ test("Pi conversations persist a frozen scope and relay streamed deltas", { time
 		request: "Compare the values",
 		provider: "test-provider",
 		modelId: "test-model",
+		attachments,
+		executionIds: [preview.id],
 	});
+	const originalContext = JSON.stringify(conversation.scope.context);
+	const originalHash = conversation.scope.contextHash;
+	assert.equal(originalHash, createHash("sha256").update(originalContext).digest("hex"));
+	assert.equal(conversation.scope.context.rowsIncluded, false);
+	assert.equal(conversation.scope.context.executionResults![0].state, "previewed");
+	assert.equal(conversation.scope.context.executionResults![0].kind, "filter");
+	assert.equal(Object.hasOwn(conversation.scope.context.executionResults![0], "spec"), false);
+	assert.equal(Object.hasOwn(conversation.scope.context.executionResults![0], "result"), false);
+	attachments[0].content = "MUTATED_AFTER_CREATE";
+	conversation.scope.context.attachedFiles![0].name = "mutated.sql";
+	assert.equal(
+		JSON.stringify((await service.get(project.id, dataset.id, conversation.id)).scope.context),
+		originalContext,
+	);
+	await assert.rejects(
+		service.create(project.id, dataset.id, {
+			datasetVersionId: dataset.currentVersionId,
+			selectedColumns: [0],
+			filters: [],
+			request: "Inspect",
+			provider: "test-provider",
+			modelId: "test-model",
+			executionIds: [randomUUID()],
+		}),
+		status(404),
+	);
+	await assert.rejects(
+		service.send(project.id, dataset.id, conversation.id, { message: "Change files", attachments }),
+		status(400),
+	);
 	const events: string[] = [];
 	const completed = await service.send(
 		project.id,
@@ -408,6 +451,41 @@ test("Pi conversations persist a frozen scope and relay streamed deltas", { time
 	assert.deepEqual(events, ["Pi ", "streams."]);
 	assert.equal(completed.messages.at(-1)?.text, "Pi streams.");
 	assert.equal(completed.sessionFile, "session.jsonl");
+	assert.equal(JSON.stringify(JSON.parse(inputs[0].user).context), originalContext);
+	assert.equal(inputs[0].user.includes("MUTATED_AFTER_CREATE"), false);
+	await state.store.discardTransform(project.id, dataset.id, preview.id);
+	await service.close();
+	await state.store.close();
+	state.store = new WorkbenchStore(state.root);
+	await state.store.init();
+	const reopened = new ConversationService(state.store, driver);
+	context.after(() => reopened.close());
+	const restored = await reopened.get(project.id, dataset.id, conversation.id);
+	assert.equal(JSON.stringify(restored.scope.context), originalContext);
+	assert.equal(restored.scope.contextHash, originalHash);
+	const continued = await reopened.send(project.id, dataset.id, conversation.id, {
+		message: "Continue without changing scope",
+	});
+	assert.equal(inputs[1].user, "Continue without changing scope");
+	assert.equal(inputs[1].sessionFile, "session.jsonl");
+	assert.equal(inputs[1].system, inputs[0].system);
+	assert.equal(JSON.stringify(continued.scope.context), originalContext);
+	assert.equal(continued.scope.contextHash, originalHash);
+	assert.equal(continued.scope.context.executionResults![0].state, "previewed");
+	const legacy = structuredClone(continued);
+	delete legacy.scope.context.attachedFiles;
+	delete legacy.scope.context.executionResults;
+	legacy.scope.contextHash = createHash("sha256").update(JSON.stringify(legacy.scope.context)).digest("hex");
+	await state.store.putConversation(legacy);
+	await reopened.close();
+	await state.store.close();
+	state.store = new WorkbenchStore(state.root);
+	await state.store.init();
+	const oldScope = await state.store.conversation(project.id, dataset.id, conversation.id);
+	assert.equal(JSON.stringify(oldScope.scope.context), JSON.stringify(legacy.scope.context));
+	assert.equal(oldScope.scope.contextHash, legacy.scope.contextHash);
+	assert.equal(Object.hasOwn(oldScope.scope.context, "attachedFiles"), false);
+	assert.equal(Object.hasOwn(oldScope.scope.context, "executionResults"), false);
 });
 
 test(
@@ -448,5 +526,74 @@ test(
 		const cancelled = await pending;
 		assert.equal(cancelled.state, "failed");
 		assert.equal(cancelled.messages.at(-1)?.state, "cancelled");
+	},
+);
+
+test(
+	"conversation payload limits reject before creation or running-state persistence",
+	{ timeout: 120_000 },
+	async (context) => {
+		const { state, project, dataset } = await fixture(context);
+		const profiling = await state.store.profile(project.id, dataset.id);
+		assert.equal((await waitJob(state.store, project.id, profiling.id)).state, "completed");
+		const profile = await state.store.getProfile(project.id, dataset.id);
+		assert.ok(profile);
+		let driverCalls = 0;
+		const driver: ConversationDriver = {
+			async chat() {
+				driverCalls++;
+				throw new Error("Oversized payload reached the driver");
+			},
+			async setCredential() {},
+			async deleteCredential() {},
+			async close() {},
+		};
+		const service = new ConversationService(state.store, driver);
+		context.after(() => service.close());
+		const selection = {
+			datasetVersionId: dataset.currentVersionId,
+			selectedColumns: [0, 1],
+			filters: [],
+			request: "Inspect",
+			provider: "test-provider",
+			modelId: "test-model",
+		};
+		const conversation = await service.create(project.id, dataset.id, selection);
+		const base = prepareAssistantContext(project, dataset, profile, [], selection);
+		const nearLimitName = "x".repeat(
+			ASSISTANT_CONTEXT_BYTES - Buffer.byteLength(JSON.stringify(base)) + dataset.schema[0].name.length - 1,
+		);
+		dataset.schema[0].name = nearLimitName;
+		profile.columns[0].name = nearLimitName;
+		assert.ok(
+			Buffer.byteLength(JSON.stringify(prepareAssistantContext(project, dataset, profile, [], selection))) <=
+				ASSISTANT_CONTEXT_BYTES,
+		);
+		const largeMetadataService = new ConversationService(
+			{
+				getProject: state.store.getProject.bind(state.store),
+				getDataset: async () => dataset,
+				getProfile: async () => profile,
+				listCharts: state.store.listCharts.bind(state.store),
+				transformHistory: state.store.transformHistory.bind(state.store),
+				conversations: state.store.conversations.bind(state.store),
+				conversation: state.store.conversation.bind(state.store),
+				putConversation: state.store.putConversation.bind(state.store),
+				conversationSessionDir: state.store.conversationSessionDir.bind(state.store),
+			},
+			driver,
+		);
+		context.after(() => largeMetadataService.close());
+		await assert.rejects(largeMetadataService.create(project.id, dataset.id, selection), status(413));
+		assert.equal((await state.store.conversations(project.id, dataset.id)).length, 1);
+		conversation.scope.context.limitations = ["\u0000".repeat(ASSISTANT_CONTEXT_BYTES / 6)];
+		conversation.scope.contextHash = createHash("sha256")
+			.update(JSON.stringify(conversation.scope.context))
+			.digest("hex");
+		await state.store.putConversation(conversation);
+		const before = JSON.stringify(await state.store.conversation(project.id, dataset.id, conversation.id));
+		await assert.rejects(service.send(project.id, dataset.id, conversation.id, { message: "Inspect" }), status(413));
+		assert.equal(JSON.stringify(await state.store.conversation(project.id, dataset.id, conversation.id)), before);
+		assert.equal(driverCalls, 0);
 	},
 );
