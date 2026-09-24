@@ -1,20 +1,20 @@
 # Data-science workbench implementation plan
 
-Status: proposed architecture; awaiting approval. This document completes Prompt 1 in `pi-data-science-workbench-prompts.md`. It does not authorize Prompt 2 or any later implementation.
+Status: architecture and Prompts 2–3 approved. Three-panel shell and CSV/Parquet ingestion implemented; current verification is recorded below. Prompt 4 and later stages remain unimplemented and require their own approval.
 
 ## 1. Scope and current checkpoint
 
 The product is a keyboard-first Pi workbench, not a generic dashboard: resizable project/dataset navigation on the left, data/code/visualization work in the center, and assistant/evidence/activity on the right. Side-by-side comparisons must be first-class layout state. Dataset versions, operations, charts, evidence, sessions, and runs should have explicit identities and inspectable provenance.
 
-Confirmed earlier choices: local single-user operation, Windows first, initial CSV workload up to 100,000,000 bytes. The uploaded sequence additionally requires Parquet at Prompt 3. This plan includes CSV and Parquet at that stage; parser limits and decompressed-data limits need explicit approval before implementation.
+Confirmed choices: local single-user operation, Windows x64 first, CSV and Parquet up to 100,000,000 bytes. Prompt 3 conservative limits were approved: 512 columns, 1 MiB serialized record, 256 MiB decoded output, 16 MiB Parquet footer, 64 MiB declared uncompressed row group, 1 GiB worker committed memory, five-minute processing deadline, and bounded DuckDB spill/artifacts. Preview responses are at most 500 rows and 8 MiB.
 
 Prompt 0's operating rules are already present in `AGENTS.md`. No duplicate instructions are necessary.
 
 ### Existing uncommitted work is provisional
 
-Before the staged prompts were supplied, a CSV-only slice was written in `packages/workbench`, with root changes in `package.json`, `package-lock.json`, and `tsconfig.json`. It includes a local HTTP host, filesystem project metadata, fixed CSV worker, paginated previews, elementary column profiles, and a native-DOM browser interface. It does not implement the requested three-panel shell, Parquet, DuckDB, complete quality profiles, or assistant integration.
+The original CSV-only slice has been reconciled into `packages/workbench`: native-DOM shell, SQLite application metadata, project-scoped durable jobs, streamed CSV/Parquet imports, immutable originals, separate versioned DuckDB artifacts, and bounded previews. The existing elementary profiles remain; complete quality profiles, charts, and assistant integration are not implemented.
 
-Preserve these files; do not silently delete them, commit them, or call Prompts 2–4 complete. Reconcile reusable behavior and tests in the appropriate approved stage. A future storage migration must retain original files and verify hashes; do not strand existing local data or keep two competing ingestion implementations indefinitely.
+Changes remain uncommitted. Legacy JSON projects migrate under the existing storage lock with source-hash verification; originals and legacy metadata are retained. The former JSONL preview engine is no longer used.
 
 Historical verification before the stage reset:
 
@@ -25,7 +25,17 @@ Historical verification before the stage reset:
 - The compatible Node installation produced an engine warning for the existing Gondolin example, which requires Node `>=23.6.0`; that example was not run.
 - No browser workflow, near-100 MB UI import, or visual verification was completed. No application service was started. No commit or branch change was made.
 
-This checkpoint is not a green baseline. Resolve the lint advisory and hydrate the missing model data when code verification resumes; do not alter model APIs or suppress type errors to work around missing generated data.
+This historical checkpoint was not a green baseline. Subsequent work resolved its prerequisites; the current Prompt 3 results below supersede it. Model APIs were not weakened to bypass missing generated data.
+
+### Prompt 3 verification checkpoint
+
+- Real browser: project description/default rows, CSV/Parquet import and schema, exact large integer/decimal text, null/empty distinction, paging, malformed input preserving the current dataset, cancellation, fresh-file retry, same-project duplicate indication, and persistence across server restart.
+- Near-limit browser import: 98,688,899-byte CSV, 100,000 rows. The 50-second observation window saw server private memory at most 72,056,832 bytes and working set at most 67,878,912 bytes; this is an observed workload, not a universal bound.
+- Real Windows helper tests enforce per-process and aggregate 1 GiB JobObject memory limits; verify timeout, cancellation, parent/launcher death, descendant cleanup, and environment sanitization. This is resource isolation, not a filesystem/network sandbox.
+- Focused tests cover migration repair/restart, project-scoped endpoints, malformed formats/encodings, serialized-record and decoded limits, Parquet row-group limits, and short byte-capped preview pages.
+- All 67 focused workbench tests passed across the documented test files; `npm run check` passed formatting/lint, pinned dependencies, import/lock checks, root/workbench types, and browser bundling. Node still emits its experimental SQLite/MockTimers notices during tests; no suppression was added.
+- Parquet group metadata exposes null native types for LIST/STRUCT nodes; bounded schema binding now obtains complete column types without reading rows. Regression fixtures include lists and exact numeric values.
+- No AI, generated-code execution, or Prompt 4 expansion. See the root README for current commands and supported limits.
 
 ## 2. Repository map
 
@@ -77,7 +87,7 @@ JSONL RPC and framed CBOR are different protocols. A command response may mean a
 
 ## 4. Proposed architecture and data flow
 
-All decisions in this section require approval. Do not install these future dependencies during Prompt 1.
+The architecture choices below were approved before implementation; later-stage integrations still require their own approval.
 
 ```text
 Browser: three-panel shell and bounded view models
@@ -174,20 +184,20 @@ Expected Prompt 1 change: this document only. Future root wiring stays limited t
 | Confirmed by user | Local, single-user, browser application first; Windows target; initial CSV up to 100 MB. |
 | Confirmed by uploaded instructions | Sequential stages with stop points; three-panel resizable interface; side-by-side comparisons; CSV and Parquet at ingestion; no product changes during Prompt 1. |
 | Confirmed from source | npm/TypeScript/esbuild/Biome setup; supported Node SDK and JSONL RPC; experimental remote stack; real agent persistence; no ready multi-user web auth or analytical job service. |
-| Proposed for approval | One workbench workspace; native DOM/CSS + esbuild shell; direct public SDK host integration; SQLite application metadata; DuckDB analytical process. |
-| Needs validation at its stage | DuckDB native installation, cancellation and actual process memory/disk limits on Windows; Parquet decompression bounds; treatment of precision/dates/nested types. |
+| Approved architecture | One workbench workspace; native DOM/CSS + esbuild shell; later direct public SDK integration; SQLite application metadata; DuckDB analytical process. |
+| Verified at Prompt 3 | Windows native ingestion/preview, memory enforcement and lifecycle, bounded response/decoded data, Parquet precision/list values, and observed near-limit artifact usage. DuckDB spill configuration is not an OS-wide disk quota. |
 | Needs validation before agent use | SDK resource loading isolation, exact allowed tools, server-only secret handling, approved compact context and safe streaming/reconnect behavior. |
 | Needs validation before generated code | Available Windows-compatible OS sandbox/runtime and fail-closed execution proof. Neither worker_threads nor subprocess RPC is enough. |
 | Deferred, not omitted | Hosted identity provider, deployment platform, shared database/blob storage, quotas, billing if ever needed. Decide at multi-user/deployment stages, not now. |
 
 ## 7. Milestones and stage gates
 
-Only Prompt 1 is being executed. The table is sequencing, not permission to implement the later prompts. Read each full prompt immediately before its stage and update this plan if findings require an approved change.
+Prompts 1–3 have been approved and implemented. Read each later prompt immediately before its stage; do not advance automatically.
 
 | Stage | Bounded deliverable and exit gate |
 | --- | --- |
 | 0 | Existing persistent project instructions reconciled; no duplicate rule file. |
-| 1, current | Source-grounded plan, decisions and risks; stop for architecture approval. |
+| 1 | Completed source-grounded plan; architecture approved. |
 | 2 | Three resizable panels, requested center/right tabs, palette, themes, persistent layout and accessibility. Clearly labelled shell-only view models where needed. Browser proof and component behavior tests; no ingestion expansion. |
 | 3 | Project/dataset entities, CSV and Parquet streaming ingestion, immutable sources, hashes, bounded analytical previews, progress/cancel/retry, safe failures and project scoping. Reconcile provisional storage rather than declare it sufficient. |
 | 4 | Deterministic versioned profiles and quality evidence, richer statistics/semantic candidates, exact-vs-approximate labels, cache keys and cancellation. Provisional min/max/counts are not the complete stage. |
@@ -262,14 +272,14 @@ Official analytical-client evidence: [DuckDB Node Neo overview](https://duckdb.o
 
 ## 11. Approval gate
 
-Approve or amend these choices before Prompt 2:
+Approved architecture choices (recorded before Prompt 2):
 
 1. One private `packages/workbench` application; no Pi core/public-API changes.
-2. Native TypeScript DOM/CSS + esbuild for the three-panel shell, or explicitly choose a frontend framework now.
+2. Native TypeScript DOM/CSS + esbuild for the three-panel shell.
 3. Public Node SDK host adapter for later assistant integration, with custom-tool allowlist and controlled resources; no raw browser RPC.
 4. SQLite application metadata plus immutable local files; DuckDB analytical worker for CSV and Parquet at Prompt 3.
 5. Fixed operations first; generated Python/shell only after a verified fail-closed OS sandbox.
 
-Preserve the provisional implementation while its parts are reconciled stage by stage. Do not automatically create branches or commit existing work to satisfy the uploaded workflow suggestion; the worktree contains prior uncommitted changes and the user's prompt file. Agree on the checkpoint/branch action before doing either.
+Preserve uncommitted implementation and source data. Do not automatically create branches or commit existing work; the worktree also contains the user's prompt file. Agree on checkpoint/branch action before doing either.
 
-Stop here. Next task, only after approval: read Prompt 2 in full and present its exact file scope and acceptance criteria before changing code.
+Stop after Prompt 3 acceptance. Next recommended task, only after approval: read Prompt 4 in full and present its exact file scope and acceptance criteria before changing code.

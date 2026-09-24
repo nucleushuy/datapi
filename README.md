@@ -62,7 +62,7 @@ npm run check         # Lint, format, and type check
 
 ## Local data workbench
 
-Requires Node.js **22.19.0 or newer** and the root workspace dependencies. Start from the repository root:
+Requires **Windows 10 or later, x64, Node.js 22.19.0 or newer**, and the root workspace dependencies. Analytical processing fails closed on other platforms. Start from the repository root:
 
 ```bash
 npm install --ignore-scripts
@@ -79,20 +79,25 @@ The shell has project/dataset navigation, Data/Code/Visualize/Statistics/Models 
 
 Use the Commands button or Ctrl+K (Command+K on macOS) for navigation, theme, and layout actions. Tab groups support Left/Right and Home/End. Escape closes the command palette and restores focus. Panel widths, selected tabs, and theme persist in browser storage for the same server address. Reset layout restores the default shell arrangement.
 
-The existing local CSV workflow remains available: create a project, import UTF-8 CSV up to 100 MB, inspect paginated original values, open column profiles in Statistics, and inspect source provenance. Project/dataset files default to `~/.datapi/workbench`. No dataset content is sent to an LLM.
+Create a project with a description and default preview size, import UTF-8 CSV or Parquet up to 100,000,000 bytes, and inspect original values, native/basic column types, elementary profiles, and version provenance. Preview pages contain at most 500 rows and 8 MiB, including response metadata; wide rows produce shorter pages without skipping rows. Parquet integers/decimals remain exact text, and NULL stays distinct from an empty string. No dataset content is sent to an LLM.
 
-Code, Visualize, Models, and assistant views are explicitly **not connected in this stage**. They do not execute code, create charts, train models, or call an AI provider. The CSV backend remains provisional; this shell stage does not implement the later ingestion architecture.
+Application metadata lives in SQLite under `~/.datapi/workbench`; original files and separate immutable DuckDB versions use generated paths. Imports stream to staging while hashing. Failed or cancelled imports publish no dataset; Retry import requests the original file again for a fresh upload. Duplicate hashes are identified only within the same project, without sharing dataset IDs or storage. Existing JSON-backed projects migrate on startup while retaining original files and legacy metadata; a failed migration stops startup with a safe error rather than discarding data.
+
+Ingestion limits: 512 columns, 1 MiB serialized record, 256 MiB decoded output, 16 MiB Parquet footer, and 64 MiB declared uncompressed row group. Fixed analytical workers use a Windows JobObject with a 1 GiB committed-memory cap, a five-minute deadline, and descendant cleanup; DuckDB has a 256 MiB buffer limit and 512 MiB spill limit. Derived database files have a separate 512 MiB limit. These limits can reject valid highly compressed datasets. Encrypted Parquet, INT96, nanosecond UTC timestamps and nanosecond times are explicitly unsupported. This resource boundary is **not** a filesystem/network sandbox and never accepts user code or arbitrary SQL.
+
+Code, Visualize, Models, and assistant views are explicitly **not connected in this stage**. They do not execute code, create charts, train models, or call an AI provider. Richer profiling and data-quality reports are a later stage.
 
 Focused checks (from the repository root; no full build or provider tests):
 
 ```bash
-node --test packages/workbench/test/browser/shell.test.ts
-node --test packages/workbench/test/profiler.test.ts packages/workbench/test/storage.test.ts packages/workbench/test/server.test.ts
+node --test packages/workbench/test/browser/shell.test.ts packages/workbench/test/browser/ingestion.test.ts
+node --test packages/workbench/test/profiler.test.ts packages/workbench/test/storage.test.ts packages/workbench/test/server.test.ts packages/workbench/test/legacy-migration.test.ts
+node --test packages/workbench/test/format-validation.test.ts packages/workbench/test/analytical.test.ts packages/workbench/test/analytical-process.test.ts
 npm run typecheck --workspace=@earendil-works/pi-workbench
 npm run check
 ```
 
-Component tests cover shell tabs, resizing, palette interaction, persistence, invalid preferences, and recovery. Real-browser verification is also required for responsive layout, pointer interaction, focus, and the existing CSV flow. `npm run check` does not run the tests.
+Tests cover shell interaction, ingestion controls, CSV/Parquet values, pagination, cancellation/retry, migration, project isolation, and real Windows worker resource/lifecycle boundaries. Real-browser verification is also required for responsive layout and the complete import workflow. `npm run check` does not run tests.
 
 ## Building standalone binaries from release source
 

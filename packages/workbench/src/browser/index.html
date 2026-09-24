@@ -29,6 +29,10 @@
 						<form id="project-form">
 							<label for="project-name">Project name</label>
 							<input id="project-name" name="name" required maxlength="120" autocomplete="off" placeholder="e.g. Customer research" disabled />
+							<label for="project-description-input">Description <span class="muted">(optional)</span></label>
+							<textarea id="project-description-input" name="description" rows="3" maxlength="2000" placeholder="What is this project investigating?" disabled></textarea>
+							<label for="project-preview-limit">Default preview rows</label>
+							<select id="project-preview-limit" name="previewRowLimit" disabled><option value="25">25 rows</option><option value="100" selected>100 rows</option><option value="500">500 rows</option></select>
 							<p id="project-error" class="inline-error" role="alert" hidden></p>
 							<button id="create-project" class="button button-primary" type="submit" disabled>Create project</button>
 						</form>
@@ -46,23 +50,31 @@
 			<main id="workspace" class="workspace" tabindex="-1">
 				<div class="workspace-heading">
 					<div class="heading-copy"><p class="eyebrow">Data workspace</p><h1 id="project-heading">Opening workbench</h1><p id="project-description" class="muted">Connecting to your local server…</p></div>
-					<button id="import-button" class="button button-primary" type="button" disabled>Import CSV</button>
-					<input id="csv-file" class="visually-hidden" type="file" accept=".csv,text/csv" tabindex="-1" aria-label="Choose a CSV file to import" />
+					<button id="import-button" class="button button-primary" type="button" disabled>Import dataset</button>
+					<input id="csv-file" class="visually-hidden" type="file" accept=".csv,.parquet,text/csv,application/csv,application/vnd.ms-excel,text/plain,application/vnd.apache.parquet,application/x-parquet,application/parquet,application/octet-stream" tabindex="-1" aria-label="Choose a CSV or Parquet file to import" />
 				</div>
-				<details class="format-details"><summary>Supported CSV format</summary><p>UTF-8 (BOM allowed), comma-separated, with unique nonempty column names in the first row. Up to 100 MB (100,000,000 bytes), 512 columns, and 1 MB per logical record. Double-quoted fields may contain commas or line breaks; every row must have the same number of fields. A header-only file is valid. Empty means an empty string; whitespace is preserved.</p></details>
+				<details class="format-details"><summary>Supported formats and limits</summary><p><strong>CSV:</strong> UTF-8 (BOM allowed), comma-separated, with unique nonempty column names in the first row. Double-quoted fields may contain commas or line breaks; every row must have the same number of fields. A header-only file is valid. Empty strings, whitespace, and leading zeros are preserved.</p><p><strong>Parquet:</strong> A valid, unencrypted .parquet file. Native types are shown alongside basic types. Preview values use DuckDB text; integers and decimals retain their exact text, and nested values are explicitly labeled. Null and empty string are distinct.</p><p id="format-limits">Up to 100 MB (100,000,000 bytes) per file, 512 columns, 1 MiB per record, and 256 MiB decoded data. Parquet metadata: 16 MiB footer and 64 MiB uncompressed row group. Processing: 1 GiB worker memory, 512 MiB temporary disk, and 5 minutes. Preview: up to 500 rows and 8 MiB per page; wide rows may produce shorter pages. File extension, MIME hint, and content must agree; unsupported or oversized files are rejected, never sampled silently.</p></details>
 				<div id="notice" class="notice" hidden><p id="notice-text" role="alert"></p><button id="dismiss-notice" class="button button-quiet" type="button">Dismiss</button><button id="reload-app" class="button" type="button" hidden>Reload workbench</button></div>
 				<div id="shell-error" class="notice" role="alert" hidden><p>Something interrupted the workbench. Reload to reconnect to your local workspace.</p><button id="shell-reload" class="button" type="button">Reload workbench</button></div>
 				<p id="shell-storage-note" class="storage-note" role="status" hidden>Layout preferences could not be saved in this browser. You can keep working; your local datasets are unaffected.</p>
 				<section id="operation" class="operation" aria-labelledby="operation-title" hidden>
 					<div class="operation-heading"><div class="heading-copy"><p id="operation-context" class="eyebrow"></p><h2 id="operation-title"></h2></div><span id="operation-state" class="state-label"></span></div>
 					<progress id="operation-progress" aria-label="Operation progress"></progress>
-					<div class="operation-footer"><p id="operation-detail" class="muted"></p><div class="button-row"><button id="retry-operation" class="button" type="button" hidden>Check status</button><button id="cancel-operation" class="button" type="button">Cancel</button><button id="open-operation" class="button" type="button" hidden>Open dataset</button><button id="dismiss-operation" class="button button-quiet" type="button" hidden>Dismiss</button></div></div>
+					<div class="operation-footer"><p id="operation-detail" class="muted"></p><div class="button-row"><button id="retry-operation" class="button" type="button" hidden>Check status</button><button id="retry-import" class="button" type="button" hidden>Retry import</button><button id="cancel-operation" class="button" type="button">Cancel</button><button id="open-operation" class="button" type="button" hidden>Open dataset</button><button id="dismiss-operation" class="button button-quiet" type="button" hidden>Dismiss</button></div></div>
+					<input id="retry-file" class="visually-hidden" type="file" accept=".csv,.parquet,text/csv,application/csv,application/vnd.ms-excel,text/plain,application/vnd.apache.parquet,application/x-parquet,application/parquet,application/octet-stream" tabindex="-1" aria-label="Choose the original file again to retry this import" />
 					<p id="operation-error" class="inline-error" role="alert" hidden></p>
 				</section>
 				<div id="shell-loading" class="shell-loading" role="status" aria-label="Loading workbench">
 					<p class="eyebrow">Opening local workspace…</p>
 					<div class="skeleton" aria-hidden="true"><span></span><span></span><span></span></div>
 				</div>
+				<section id="rich-profile" class="rich-profile" aria-labelledby="rich-profile-heading" hidden>
+					<div class="profile-toolbar"><div class="heading-copy"><p class="eyebrow">Deterministic / no LLM</p><h2 id="rich-profile-heading">Dataset overview</h2></div><div class="button-row"><button id="run-profile" class="button button-primary" type="button" disabled>Run profile</button><button id="retry-profile" class="button" type="button" hidden>Reload saved profile</button></div></div>
+					<p id="rich-profile-status" class="table-footnote" role="status"></p>
+					<p id="rich-profile-error" class="inline-error" role="alert" hidden></p>
+					<dl id="profile-overview" class="profile-overview" aria-label="Dataset overview metrics"></dl>
+					<details id="profile-method" class="profile-method" hidden><summary>Sampling, approximations and limitations</summary><p id="profile-sampling"></p><dl id="profile-metadata" class="profile-facts"></dl><ul id="profile-limitations"></ul></details>
+				</section>
 				<nav class="shell-tabs workspace-tabs" role="tablist" aria-label="Workspace views">
 					<button id="center-tab-data" class="shell-tab" type="button" role="tab" data-center-tab="data" aria-selected="true" aria-controls="center-panel-data" tabindex="0">Data</button>
 					<button id="center-tab-code" class="shell-tab" type="button" role="tab" data-center-tab="code" aria-selected="false" aria-controls="center-panel-code" tabindex="-1">Code</button>
@@ -72,46 +84,58 @@
 				</nav>
 				<div id="center-panel-data" class="workspace-panel" role="tabpanel" aria-labelledby="center-tab-data" tabindex="0">
 				<section id="empty-state" class="empty-state" aria-labelledby="empty-title">
-					<span class="empty-index" aria-hidden="true">01 / START HERE</span><h2 id="empty-title">A place to understand your data.</h2><p id="empty-description">Create a project, import a CSV, and inspect the original rows alongside reproducible column statistics.</p><button id="empty-action" class="button" type="button" disabled>Create your first project</button><p id="import-help" class="format-note">UTF-8 · Comma-separated · Header row required · Up to 100 MB</p>
+					<span class="empty-index" aria-hidden="true">01 / START HERE</span><h2 id="empty-title">A place to understand your data.</h2><p id="empty-description">Create a project, import CSV or Parquet, and inspect the source rows alongside reproducible column statistics.</p><button id="empty-action" class="button" type="button" disabled>Create your first project</button><p id="import-help" class="format-note">CSV or Parquet · Up to 100 MB per file · 256 MiB decoded</p>
 				</section>
 				<section id="dataset-loading" class="loading-state" aria-live="polite" hidden>Loading dataset…</section>
 				<section id="dataset-error" class="empty-state" hidden><h2>Could not open this dataset</h2><p id="dataset-error-text" role="alert"></p><button id="retry-dataset" class="button" type="button">Try again</button></section>
 				<section id="dataset" class="dataset" aria-labelledby="dataset-heading" hidden>
-					<div class="dataset-heading"><div class="heading-copy"><p class="eyebrow">Source dataset</p><h2 id="dataset-heading"></h2><p id="dataset-summary" class="dataset-summary"></p></div><span class="source-label">CSV / ORIGINAL</span></div>
-					<div class="view-switcher" role="group" aria-label="Dataset view"><button id="view-preview" class="view-button" type="button" aria-pressed="true" aria-controls="preview-panel">Preview</button><button id="view-profile" class="view-button" type="button" aria-controls="center-panel-statistics">Column profile</button><button id="view-provenance" class="view-button" type="button" aria-pressed="false" aria-controls="provenance-panel">Provenance</button></div>
+					<div class="dataset-heading"><div class="heading-copy"><p class="eyebrow">Source dataset</p><h2 id="dataset-heading"></h2><p id="dataset-summary" class="dataset-summary"></p></div><span id="source-label" class="source-label"></span></div>
+					<p id="duplicate-note" class="storage-note" hidden></p>
+					<div class="view-switcher" role="group" aria-label="Dataset view"><button id="view-preview" class="view-button" type="button" aria-pressed="true" aria-controls="preview-panel">Preview</button><button id="view-profile" class="view-button" type="button" aria-controls="center-panel-statistics">Statistics</button><button id="view-quality" class="view-button" type="button" aria-controls="quality-panel">Data Quality</button><button id="view-provenance" class="view-button" type="button" aria-pressed="false" aria-controls="provenance-panel">Provenance</button></div>
 					<section id="preview-panel" aria-label="Dataset preview">
-						<div class="panel-intro"><p>Original values. No transformations applied.</p><span class="muted">∅ = empty string</span></div>
+						<div class="preview-profile-layout">
+						<aside id="column-inspector" class="column-inspector" aria-label="Column profile beside data preview"><label for="column-search">Search columns</label><input id="column-search" type="search" autocomplete="off" spellcheck="false" placeholder="Name, type or semantic candidate" aria-controls="column-list" /><p id="column-search-status" class="muted" role="status"></p><ul id="column-list" class="column-list" aria-label="Dataset columns"></ul><section id="column-details" class="column-details" aria-label="Selected column details" tabindex="-1"></section></aside>
+						<div class="preview-data">
+						<div class="panel-intro"><p id="preview-description">Source values. No transformations applied.</p><span class="muted">∅ = empty string · NULL = missing value</span></div>
 						<div id="preview-status" class="table-status" role="status"></div>
 						<button id="retry-preview" class="button table-retry" type="button" hidden>Retry preview</button>
-						<div id="preview-scroll" class="table-scroll" tabindex="0" role="region" aria-label="Scrollable data preview" hidden><table id="preview-table"><caption class="visually-hidden">Original CSV rows</caption><thead id="preview-head"></thead><tbody id="preview-body"></tbody></table></div>
-						<div class="pagination"><span id="page-summary" class="muted"></span><div class="button-row"><button id="previous-page" class="button" type="button" disabled>Previous</button><button id="next-page" class="button" type="button" disabled>Next</button></div></div>
+						<div id="preview-scroll" class="table-scroll" tabindex="0" role="region" aria-label="Scrollable data preview" hidden><table id="preview-table"><caption class="visually-hidden">Source rows with basic and native column types</caption><thead id="preview-head"></thead><tbody id="preview-body"></tbody></table></div>
+						<div class="pagination"><span id="page-summary" class="muted"></span><div class="page-size"><label for="preview-limit">Rows per page</label><select id="preview-limit"><option value="25">25</option><option value="100" selected>100</option><option value="500">500</option></select></div><div class="button-row"><button id="previous-page" class="button" type="button" disabled>Previous</button><button id="next-page" class="button" type="button" disabled>Next</button></div></div>
+						<p id="page-limit-note" class="table-footnote" role="status" hidden>This page is shorter to keep the preview response within 8 MiB, including metadata. Next continues from the following row; no rows are skipped.</p>
+						</div>
+						</div>
 					</section>
 					<section id="profile-panel" aria-label="Column profiles" hidden>
-						<div class="panel-intro"><p>Computed from every row, not a sample.</p><span class="muted">Types are inferred; values are unchanged.</span></div>
+						<div class="panel-intro"><p>Elementary ingestion statistics · every source row, not a sample.</p><span class="muted">Separate from the optional rich profile.</span></div>
 						<div class="table-scroll" tabindex="0" role="region" aria-label="Scrollable column profiles"><table class="profile-table"><caption class="visually-hidden">Column types, empty values, and numeric statistics</caption><thead><tr><th scope="col">Column</th><th scope="col">Inferred type</th><th scope="col" class="numeric">Empty</th><th scope="col" class="numeric">Numeric values</th><th scope="col" class="numeric">Minimum</th><th scope="col" class="numeric">Maximum</th></tr></thead><tbody id="profile-body"></tbody></table></div>
-						<p class="table-footnote">Empty means an empty string; whitespace is preserved. Numeric counts and ranges include the finite numeric subset, even in mixed-type columns. A dash means no numeric values.</p>
+						<p id="profile-footnote" class="table-footnote">Empty means an empty string; whitespace is preserved. Numeric counts and ranges include the finite numeric subset, even in mixed-type columns. A dash means no numeric values.</p>
 					</section>
 					<section id="provenance-panel" class="provenance-panel" aria-label="Dataset provenance" hidden>
 						<div class="panel-intro"><p>A reproducible record of this import.</p></div>
 						<dl id="provenance" class="provenance"></dl>
-						<div class="recompute"><div><h3>Recompute column profile</h3><p class="muted">Read the preserved source again with the same parsing rules. The current profile stays available until the new one is complete.</p></div><button id="recompute-button" class="button" type="button">Recompute profile</button></div>
+						<div class="recompute"><div><h3>Recompute ingestion statistics</h3><p class="muted">Read the preserved source again with the same parsing rules. This refreshes the elementary full-file statistics, not the optional rich profile.</p></div><button id="recompute-button" class="button" type="button">Recompute ingestion stats</button></div>
 					</section>
 				</section>
 				</div>
 				<section id="center-panel-code" class="workspace-panel" role="tabpanel" aria-labelledby="center-tab-code" tabindex="0" hidden>
-					<div class="empty-state future-state"><span class="empty-index">CODE / NOT CONNECTED IN THIS STAGE</span><h2>A workspace for reproducible code.</h2><p>Code editing and execution are not connected yet. Your original CSV rows and import provenance are available in Data.</p></div>
+					<div class="empty-state future-state"><span class="empty-index">CODE / NOT CONNECTED IN THIS STAGE</span><h2>A workspace for reproducible code.</h2><p>Code editing and execution are not connected yet. Your source rows and import provenance are available in Data.</p></div>
 				</section>
 				<section id="center-panel-visualize" class="workspace-panel" role="tabpanel" aria-labelledby="center-tab-visualize" tabindex="0" hidden>
 					<div class="empty-state future-state"><span class="empty-index">VISUALIZE / NOT CONNECTED IN THIS STAGE</span><h2>Make the patterns visible.</h2><p>Chart creation is not connected yet. Open Statistics to inspect the real column types, empty values, and numeric ranges in your dataset.</p></div>
 				</section>
 				<section id="center-panel-statistics" class="workspace-panel" role="tabpanel" aria-labelledby="center-tab-statistics" tabindex="0" hidden>
-					<div id="shell-statistics-empty" class="empty-state"><span class="empty-index">STATISTICS / SELECT A DATASET</span><h2>Know what is in every column.</h2><p>Import a CSV or select a dataset in the project panel to see its deterministic column profile. Statistics are computed locally from every row.</p></div>
-					<div id="shell-statistics-content" hidden><div class="statistics-heading"><p class="eyebrow">Selected dataset</p><h2>Column statistics</h2></div></div>
+					<div id="shell-statistics-empty" class="empty-state"><span class="empty-index">STATISTICS / SELECT A DATASET</span><h2>Know what is in every column.</h2><p>Select a dataset to inspect ingestion statistics. Run profile explicitly for semantic candidates, distributions, numeric statistics and evidence-based data-quality findings.</p></div>
+					<div id="shell-statistics-content" hidden>
+						<div class="statistics-heading"><p class="eyebrow">Selected dataset</p><h2 id="statistics-dataset-name">Column statistics</h2></div>
+						<div class="view-switcher" role="group" aria-label="Profile report views"><button id="statistics-view" class="view-button" type="button" aria-pressed="true" aria-controls="statistics-panel">Statistics</button><button id="quality-view" class="view-button" type="button" aria-pressed="false" aria-controls="quality-panel">Data Quality</button></div>
+						<section id="statistics-panel" aria-label="Rich column statistics"><p id="statistics-status" class="table-footnote"></p><div id="statistics-rich" hidden><div class="profile-toolbar"><div class="statistics-picker"><label for="statistics-column">Column</label><select id="statistics-column"></select></div><button id="inspect-column" class="button" type="button">Inspect beside data</button></div><section id="statistics-details" class="column-details" aria-label="Selected column statistics"></section><h3>All columns</h3><p id="statistics-basis" class="table-footnote"></p><div class="table-scroll" tabindex="0" role="region" aria-label="Rich column statistics table"><table><caption class="visually-hidden">Observed nulls, distinct values and semantic candidates</caption><thead><tr><th scope="col">Column</th><th scope="col">Original type</th><th scope="col">Semantic candidates</th><th scope="col">Nulls</th><th scope="col">Distinct</th></tr></thead><tbody id="statistics-body"></tbody></table></div></div><details id="ingestion-statistics" class="ingestion-statistics" open><summary>Elementary ingestion statistics</summary></details></section>
+						<section id="quality-panel" class="quality-panel" aria-label="Data Quality" hidden><div class="profile-toolbar"><h3>Data Quality</h3><div class="severity-picker"><label for="quality-severity">Severity</label><select id="quality-severity"><option value="all">All severities</option><option value="error">Error</option><option value="warning">Warning</option><option value="info">Info</option></select></div></div><p id="quality-summary" class="table-footnote" role="status"></p><p id="quality-basis" class="table-footnote"></p><ul id="quality-issues" class="quality-issues"></ul></section>
+					</div>
 				</section>
 				<section id="center-panel-models" class="workspace-panel" role="tabpanel" aria-labelledby="center-tab-models" tabindex="0" hidden>
 					<div class="empty-state future-state"><span class="empty-index">MODELS / NOT CONNECTED IN THIS STAGE</span><h2>Start with data you understand.</h2><p>Model training and evaluation are not connected yet. Inspect your source data and column statistics before planning a modeling workflow.</p></div>
 				</section>
-				<footer class="workspace-footer"><span>LOCAL CSV WORKBENCH</span><span id="persistence-note">Projects and datasets persist on this machine.</span></footer>
+				<footer class="workspace-footer"><span>LOCAL DATA WORKBENCH</span><span id="persistence-note">Projects and datasets persist on this machine.</span></footer>
 			</main>
 			<div id="right-splitter" class="panel-splitter" role="separator" aria-orientation="vertical" aria-label="Resize assistant panel" aria-controls="inspector-panel" aria-valuemin="240" aria-valuemax="500" aria-valuenow="300" tabindex="0"></div>
 			<aside id="inspector-panel" class="inspector" aria-labelledby="inspector-heading">

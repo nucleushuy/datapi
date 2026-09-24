@@ -14,7 +14,7 @@ const { values } = parseArgs({
 
 if (values.help) {
 	console.log("Usage: npm run dev:workbench -- --port 4310 --data-dir <directory>");
-	console.log("Local-only CSV workbench. Defaults: port 4310, data in ~/.datapi/workbench.");
+	console.log("Local-only CSV and Parquet workbench. Defaults: port 4310, data in ~/.datapi/workbench.");
 } else {
 	try {
 		if (!/^\d+$/.test(values.port)) throw new WorkbenchError(400, "Port must be an integer from 0 through 65535.");

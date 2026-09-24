@@ -66,21 +66,3 @@ export class ColumnProfiler {
 		});
 	}
 }
-
-export interface CsvWorkerRequest {
-	sourcePath: string;
-	stagingPath: string;
-	writePreview: boolean;
-}
-
-export interface CsvWorkerResult {
-	byteSize: number;
-	sha256: string;
-	rowCount: number;
-	columns: ColumnProfile[];
-}
-
-export type CsvWorkerMessage =
-	| { type: "progress"; bytesProcessed: number; rowCount: number }
-	| { type: "result"; result: CsvWorkerResult }
-	| { type: "error"; error: string };

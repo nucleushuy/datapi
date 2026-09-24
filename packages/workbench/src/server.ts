@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
-import { MAX_UPLOAD_BYTES } from "./contracts.ts";
+import { MAX_DECODED_BYTES, MAX_PREVIEW_ROWS, MAX_UPLOAD_BYTES, PAGE_SIZE, type ProjectSettings } from "./contracts.ts";
 import { WorkbenchError, WorkbenchStore } from "./storage.ts";
 
 export interface WorkbenchOptions {
@@ -21,7 +21,7 @@ function json(response: ServerResponse, status: number, value: unknown): void {
 	response.end(JSON.stringify(value));
 }
 
-async function readName(request: IncomingMessage): Promise<string> {
+async function readMetadata(request: IncomingMessage): Promise<Record<string, unknown>> {
 	if (request.headers["content-type"]?.split(";")[0].trim() !== "application/json") {
 		throw new WorkbenchError(415, "Send a JSON request.");
 	}
@@ -29,7 +29,7 @@ async function readName(request: IncomingMessage): Promise<string> {
 	let size = 0;
 	for await (const chunk of request.iterator({ destroyOnReturn: false })) {
 		size += chunk.length;
-		if (size > 4096) throw new WorkbenchError(413, "Request is too large.");
+		if (size > 32 * 1024) throw new WorkbenchError(413, "Request is too large.");
 		chunks.push(chunk);
 	}
 	let value: unknown;
@@ -38,10 +38,10 @@ async function readName(request: IncomingMessage): Promise<string> {
 	} catch {
 		throw new WorkbenchError(400, "Request contains invalid JSON.");
 	}
-	if (typeof value !== "object" || value === null || !("name" in value) || typeof value.name !== "string") {
-		throw new WorkbenchError(400, "A name is required.");
+	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+		throw new WorkbenchError(400, "Request must contain a JSON object.");
 	}
-	return value.name;
+	return value as Record<string, unknown>;
 }
 
 export async function startWorkbench(options: WorkbenchOptions): Promise<WorkbenchApplication> {
@@ -97,7 +97,13 @@ export async function startWorkbench(options: WorkbenchOptions): Promise<Workben
 		const path = url.pathname;
 		const method = request.method;
 		if (method === "GET" && path === "/api/bootstrap") {
-			json(response, 200, { token, projects: await store.listProjects(), maxUploadBytes: MAX_UPLOAD_BYTES });
+			json(response, 200, {
+				token,
+				projects: await store.listProjects(),
+				maxUploadBytes: MAX_UPLOAD_BYTES,
+				maxPreviewRows: MAX_PREVIEW_ROWS,
+				maxDecodedBytes: MAX_DECODED_BYTES,
+			});
 			return;
 		}
 		if (!path.startsWith("/api/")) {
@@ -122,15 +128,76 @@ export async function startWorkbench(options: WorkbenchOptions): Promise<Workben
 				return;
 			}
 			if (method === "POST") {
-				json(response, 201, await store.createProject(await readName(request)));
+				const input = await readMetadata(request);
+				if (
+					typeof input.name !== "string" ||
+					(input.description !== undefined && typeof input.description !== "string")
+				) {
+					throw new WorkbenchError(400, "Project name and description must be text.");
+				}
+				let settings: ProjectSettings | undefined;
+				if (input.settings !== undefined) {
+					if (
+						typeof input.settings !== "object" ||
+						input.settings === null ||
+						!("previewRowLimit" in input.settings) ||
+						typeof input.settings.previewRowLimit !== "number"
+					) {
+						throw new WorkbenchError(400, "Project settings require a numeric preview row limit.");
+					}
+					settings = { previewRowLimit: input.settings.previewRowLimit };
+				}
+				json(response, 201, await store.createProject(input.name, input.description, settings));
 				return;
 			}
 		}
 		if (parts[1] === "projects" && parts[2]) {
 			const projectId = parts[2];
 			if (parts.length === 4 && parts[3] === "imports" && method === "POST") {
-				json(response, 201, await store.createImport(projectId, await readName(request)));
+				const input = await readMetadata(request);
+				if (
+					typeof input.name !== "string" ||
+					(input.mimeType !== undefined && typeof input.mimeType !== "string")
+				) {
+					throw new WorkbenchError(400, "A filename and valid MIME hint are required.");
+				}
+				json(response, 201, await store.createImport(projectId, input.name, input.mimeType));
 				return;
+			}
+			if (parts[3] === "imports" && parts[4]) {
+				const jobId = parts[4];
+				if (parts.length === 5 && method === "GET") {
+					json(response, 200, store.getJob(projectId, jobId));
+					return;
+				}
+				if (parts.length === 5 && method === "DELETE") {
+					json(response, 200, await store.cancel(projectId, jobId));
+					return;
+				}
+				if (parts.length === 6 && parts[5] === "retry" && method === "POST") {
+					json(response, 201, await store.retryImport(projectId, jobId));
+					return;
+				}
+				if (parts.length === 6 && parts[5] === "content" && method === "PUT") {
+					store.getJob(projectId, jobId);
+					if (Number(request.headers["content-length"] ?? 0) > MAX_UPLOAD_BYTES) {
+						throw new WorkbenchError(413, "Dataset files must be 100 MB or smaller.");
+					}
+					request.setTimeout(30_000, () => request.destroy());
+					try {
+						const job = await store.upload(
+							projectId,
+							jobId,
+							request.iterator({ destroyOnReturn: false }),
+							request.headers["content-type"],
+						);
+						if (!request.complete) response.setHeader("Connection", "close");
+						json(response, 202, job);
+					} finally {
+						request.setTimeout(0);
+					}
+					return;
+				}
 			}
 			if (parts[3] === "datasets") {
 				if (parts.length === 4 && method === "GET") {
@@ -146,42 +213,25 @@ export async function startWorkbench(options: WorkbenchOptions): Promise<Workben
 					const offsetText = url.searchParams.get("offset") ?? "0";
 					if (!/^\d+$/.test(offsetText))
 						throw new WorkbenchError(400, "Preview offset must be a nonnegative integer.");
-					json(response, 200, await store.preview(projectId, datasetId, Number(offsetText)));
+					const limitText = url.searchParams.get("limit") ?? String(PAGE_SIZE);
+					if (!/^\d+$/.test(limitText)) throw new WorkbenchError(400, "Preview limit must be a positive integer.");
+					json(response, 200, await store.preview(projectId, datasetId, Number(offsetText), Number(limitText)));
 					return;
+				}
+				if (datasetId && parts.length === 6 && parts[5] === "profile") {
+					if (method === "GET") {
+						json(response, 200, { profile: await store.getProfile(projectId, datasetId) });
+						return;
+					}
+					if (method === "POST") {
+						json(response, 202, await store.profile(projectId, datasetId));
+						return;
+					}
 				}
 				if (datasetId && parts.length === 6 && parts[5] === "reprofile" && method === "POST") {
 					json(response, 202, await store.reprofile(projectId, datasetId));
 					return;
 				}
-			}
-		}
-		if (parts[1] === "imports" && parts[2]) {
-			const jobId = parts[2];
-			if (parts.length === 3 && method === "GET") {
-				json(response, 200, store.getJob(jobId));
-				return;
-			}
-			if (parts.length === 3 && method === "DELETE") {
-				json(response, 200, await store.cancel(jobId));
-				return;
-			}
-			if (parts.length === 4 && parts[3] === "content" && method === "PUT") {
-				const contentType = request.headers["content-type"]?.split(";")[0].trim();
-				if (contentType !== "text/csv" && contentType !== "application/octet-stream") {
-					throw new WorkbenchError(415, "Upload raw CSV bytes, not a form attachment.");
-				}
-				if (Number(request.headers["content-length"] ?? 0) > MAX_UPLOAD_BYTES) {
-					throw new WorkbenchError(413, "CSV files must be 100 MB or smaller.");
-				}
-				request.setTimeout(30_000, () => request.destroy());
-				try {
-					const job = await store.upload(jobId, request.iterator({ destroyOnReturn: false }));
-					if (!request.complete) response.setHeader("Connection", "close");
-					json(response, 202, job);
-				} finally {
-					request.setTimeout(0);
-				}
-				return;
 			}
 		}
 		throw new WorkbenchError(404, "Not found.");
