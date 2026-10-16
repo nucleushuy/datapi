@@ -2,7 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 import type { AssistantRun } from "./assistant-contracts.ts";
 import type { ChartRecord } from "./chart-contracts.ts";
 import type { Dataset, ImportJob, Project } from "./contracts.ts";
-import type { Conversation } from "./conversation-contracts.ts";
+import type { ChartProposal, Conversation, RenameProposal } from "./conversation-contracts.ts";
 import type { DatasetProfile } from "./profile-contracts.ts";
 import type { TransformRecord } from "./transform-contracts.ts";
 
@@ -46,7 +46,9 @@ export class MetadataStore {
 			version !== 4 &&
 			version !== 5 &&
 			version !== 6 &&
-			version !== 7
+			version !== 7 &&
+			version !== 8 &&
+			version !== 9
 		) {
 			this.#db.close();
 			throw new Error("Unsupported application metadata version.");
@@ -94,6 +96,21 @@ export class MetadataStore {
 				PRIMARY KEY(project_id,dataset_id,id)
 			);
 			CREATE INDEX IF NOT EXISTS assistant_conversations_history ON assistant_conversations(project_id,dataset_id,updated_at,id);
+			CREATE TABLE IF NOT EXISTS conversation_rename_proposals (
+				project_id TEXT NOT NULL, dataset_id TEXT NOT NULL, conversation_id TEXT NOT NULL,
+				id TEXT NOT NULL, tool_call_id TEXT NOT NULL, transform_id TEXT, result_hash TEXT, created_at TEXT NOT NULL, metadata TEXT NOT NULL,
+				PRIMARY KEY(project_id,dataset_id,conversation_id,id),
+				UNIQUE(project_id,dataset_id,conversation_id,tool_call_id),
+				FOREIGN KEY(project_id,dataset_id,conversation_id) REFERENCES assistant_conversations(project_id,dataset_id,id)
+			);
+			CREATE TABLE IF NOT EXISTS conversation_chart_proposals (
+				project_id TEXT NOT NULL, dataset_id TEXT NOT NULL, conversation_id TEXT NOT NULL,
+				id TEXT NOT NULL, tool_call_id TEXT NOT NULL, proposal_hash TEXT NOT NULL,
+				preview_hash TEXT, preview_revision INTEGER, created_at TEXT NOT NULL, metadata TEXT NOT NULL,
+				PRIMARY KEY(project_id,dataset_id,conversation_id,id),
+				UNIQUE(project_id,dataset_id,conversation_id,tool_call_id),
+				FOREIGN KEY(project_id,dataset_id,conversation_id) REFERENCES assistant_conversations(project_id,dataset_id,id)
+			);
 			CREATE TABLE IF NOT EXISTS transforms (
 				project_id TEXT NOT NULL, dataset_id TEXT NOT NULL, id TEXT NOT NULL,
 				created_at TEXT NOT NULL, state TEXT NOT NULL, metadata TEXT NOT NULL,
@@ -111,7 +128,7 @@ export class MetadataStore {
 				FOREIGN KEY(project_id,dataset_id) REFERENCES datasets(project_id,id)
 			);
 			CREATE TABLE IF NOT EXISTS migrations (name TEXT PRIMARY KEY);
-			PRAGMA user_version=7;
+			PRAGMA user_version=9;
 		`);
 		if (version < 7) {
 			for (const row of this.#db.prepare("SELECT metadata FROM assistant_conversations").all()) {
@@ -317,6 +334,173 @@ export class MetadataStore {
 				conversation.updatedAt,
 				JSON.stringify(conversation),
 			);
+	}
+	renameProposals(projectId: string, datasetId: string, conversationId: string): RenameProposal[] {
+		return this.#db
+			.prepare(
+				"SELECT metadata FROM conversation_rename_proposals WHERE project_id=? AND dataset_id=? AND conversation_id=? ORDER BY created_at,id",
+			)
+			.all(projectId, datasetId, conversationId)
+			.map((row) => decode<RenameProposal>(row)!);
+	}
+	renameProposal(
+		projectId: string,
+		datasetId: string,
+		conversationId: string,
+		id: string,
+	): RenameProposal | undefined {
+		return decode<RenameProposal>(
+			this.#db
+				.prepare(
+					"SELECT metadata FROM conversation_rename_proposals WHERE project_id=? AND dataset_id=? AND conversation_id=? AND id=?",
+				)
+				.get(projectId, datasetId, conversationId, id),
+		);
+	}
+	renameProposalForPreview(projectId: string, datasetId: string, previewId: string): RenameProposal | undefined {
+		return decode<RenameProposal>(
+			this.#db
+				.prepare(
+					"SELECT metadata FROM conversation_rename_proposals WHERE project_id=? AND dataset_id=? AND transform_id=?",
+				)
+				.get(projectId, datasetId, previewId),
+		);
+	}
+	putRenameProposal(proposal: RenameProposal): void {
+		this.#db
+			.prepare(
+				"INSERT INTO conversation_rename_proposals(project_id,dataset_id,conversation_id,id,tool_call_id,created_at,metadata) VALUES (?,?,?,?,?,?,?) ON CONFLICT(project_id,dataset_id,conversation_id,id) DO UPDATE SET metadata=excluded.metadata",
+			)
+			.run(
+				proposal.projectId,
+				proposal.datasetId,
+				proposal.conversationId,
+				proposal.id,
+				proposal.toolCallId,
+				proposal.createdAt,
+				JSON.stringify(proposal),
+			);
+	}
+	linkRenamePreview(proposal: RenameProposal, previewId: string): void {
+		this.#db
+			.prepare(
+				"UPDATE conversation_rename_proposals SET transform_id=? WHERE project_id=? AND dataset_id=? AND conversation_id=? AND id=?",
+			)
+			.run(previewId, proposal.projectId, proposal.datasetId, proposal.conversationId, proposal.id);
+	}
+	sealRenamePreview(proposal: RenameProposal, resultHash: string): void {
+		this.#db
+			.prepare(
+				"UPDATE conversation_rename_proposals SET result_hash=? WHERE project_id=? AND dataset_id=? AND conversation_id=? AND id=?",
+			)
+			.run(resultHash, proposal.projectId, proposal.datasetId, proposal.conversationId, proposal.id);
+	}
+	renamePreviewHash(proposal: RenameProposal): string | undefined {
+		const row = this.#db
+			.prepare(
+				"SELECT result_hash FROM conversation_rename_proposals WHERE project_id=? AND dataset_id=? AND conversation_id=? AND id=?",
+			)
+			.get(proposal.projectId, proposal.datasetId, proposal.conversationId, proposal.id);
+		return typeof row?.result_hash === "string" ? row.result_hash : undefined;
+	}
+	chartProposals(projectId: string, datasetId: string, conversationId: string): ChartProposal[] {
+		return this.#db
+			.prepare(
+				"SELECT metadata FROM conversation_chart_proposals WHERE project_id=? AND dataset_id=? AND conversation_id=? ORDER BY created_at,id",
+			)
+			.all(projectId, datasetId, conversationId)
+			.map((row) => decode<ChartProposal>(row)!);
+	}
+	chartProposal(projectId: string, datasetId: string, conversationId: string, id: string): ChartProposal | undefined {
+		return decode<ChartProposal>(
+			this.#db
+				.prepare(
+					"SELECT metadata FROM conversation_chart_proposals WHERE project_id=? AND dataset_id=? AND conversation_id=? AND id=?",
+				)
+				.get(projectId, datasetId, conversationId, id),
+		);
+	}
+	putChartProposal(proposal: ChartProposal, proposalHash?: string): void {
+		this.#db
+			.prepare(
+				"INSERT INTO conversation_chart_proposals(project_id,dataset_id,conversation_id,id,tool_call_id,proposal_hash,created_at,metadata) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(project_id,dataset_id,conversation_id,id) DO UPDATE SET metadata=excluded.metadata",
+			)
+			.run(
+				proposal.projectId,
+				proposal.datasetId,
+				proposal.conversationId,
+				proposal.id,
+				proposal.toolCallId,
+				proposalHash ?? "",
+				proposal.createdAt,
+				JSON.stringify(proposal),
+			);
+	}
+	sealChartPreview(proposal: ChartProposal, previewHash: string | null, revision: number | null): void {
+		this.#db
+			.prepare(
+				"UPDATE conversation_chart_proposals SET preview_hash=?,preview_revision=? WHERE project_id=? AND dataset_id=? AND conversation_id=? AND id=?",
+			)
+			.run(previewHash, revision, proposal.projectId, proposal.datasetId, proposal.conversationId, proposal.id);
+	}
+	chartProposalSeal(proposal: ChartProposal): {
+		proposalHash: string;
+		previewHash: string | null;
+		previewRevision: number | null;
+	} {
+		const row = this.#db
+			.prepare(
+				"SELECT proposal_hash,preview_hash,preview_revision FROM conversation_chart_proposals WHERE project_id=? AND dataset_id=? AND conversation_id=? AND id=?",
+			)
+			.get(proposal.projectId, proposal.datasetId, proposal.conversationId, proposal.id)!;
+		return {
+			proposalHash: String(row.proposal_hash),
+			previewHash: typeof row.preview_hash === "string" ? row.preview_hash : null,
+			previewRevision: typeof row.preview_revision === "number" ? row.preview_revision : null,
+		};
+	}
+	recoverConversations(): void {
+		this.transaction(() => {
+			for (const row of this.#db.prepare("SELECT metadata FROM assistant_conversations").all()) {
+				const conversation = decode<Conversation>(row)!;
+				if (conversation.state !== "running") continue;
+				conversation.state = "failed";
+				conversation.error = "The server stopped during this response. Send a new message to continue.";
+				conversation.updatedAt = new Date().toISOString();
+				this.putConversation(conversation);
+			}
+			for (const row of this.#db.prepare("SELECT metadata,transform_id FROM conversation_rename_proposals").all()) {
+				const proposal = decode<RenameProposal>(row)!;
+				if (proposal.state !== "previewing" && proposal.state !== "applying") continue;
+				proposal.state = "failed";
+				proposal.error =
+					"The server stopped before this operation completed. Nothing was applied; preview and approve again.";
+				proposal.updatedAt = new Date().toISOString();
+				proposal.audit.push({ at: proposal.updatedAt, action: "failed", actor: "system" });
+				if (typeof row.transform_id === "string") {
+					this.deleteTransformDraft(proposal.projectId, proposal.datasetId, row.transform_id);
+					const record = this.transform(proposal.projectId, proposal.datasetId, row.transform_id);
+					if (record && record.state !== "applied") {
+						record.state = "failed";
+						record.error = proposal.error;
+						record.completedAt = proposal.updatedAt;
+						this.putTransform(record);
+					}
+				}
+				this.putRenameProposal(proposal);
+			}
+			for (const row of this.#db.prepare("SELECT metadata FROM conversation_chart_proposals").all()) {
+				const proposal = decode<ChartProposal>(row)!;
+				if (proposal.state !== "previewing") continue;
+				proposal.state = "failed";
+				proposal.preview = null;
+				proposal.error = "The server stopped during chart preview. Nothing was saved; preview and approve again.";
+				proposal.updatedAt = new Date().toISOString();
+				proposal.audit.push({ at: proposal.updatedAt, action: "failed", actor: "system" });
+				this.putChartProposal(proposal);
+				this.sealChartPreview(proposal, null, null);
+			}
+		});
 	}
 	transforms(projectId: string, datasetId: string): TransformRecord[] {
 		return this.#db

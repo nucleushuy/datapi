@@ -5,6 +5,7 @@ import { setTimeout as pause } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { Window as TestWindow } from "happy-dom";
+import { initializeChartStudio } from "../../src/browser/chart-studio.ts";
 import type { ChartRecord, ChartResult, ChartSpec } from "../../src/chart-contracts.ts";
 import { defaultChartSpec } from "../../src/chart-spec.ts";
 import type { Bootstrap, Dataset, Project } from "../../src/contracts.ts";
@@ -289,23 +290,29 @@ async function setup(
 	browser.eval(script);
 	await waitFor(() => !element<HTMLButtonElement>("run-profile").disabled);
 	async function activate() {
+		const chartListsBefore = requests.filter(({ path }) => path.endsWith("/charts")).length;
 		element("center-tab-visualize").click();
-		await waitFor(() => requests.some(({ path }) => path.endsWith("/charts")));
+		await waitFor(() => requests.filter(({ path }) => path.endsWith("/charts")).length > chartListsBefore);
 	}
 	return { browser, document, element, change, spec, requests, activate };
 }
 
 test("studio is lazy and missing profiles give a useful direction without additional data requests", async (t) => {
 	const { element, requests, activate, document } = await setup(t, { profile: null });
-	assert.equal(
-		requests.some(({ path }) => path.endsWith("/charts")),
-		false,
-	);
+	// Chat loads saved-chart metadata even while the studio remains hidden.
+	const chartListsBefore = requests.filter(({ path }) => path.endsWith("/charts")).length;
+	assert.equal(chartListsBefore, 1);
+	assert.equal(element("center-panel-visualize").hidden, true);
+	assert.equal(element("chart-saved-status").textContent, "");
 	assert.equal(
 		requests.some(({ path }) => path.endsWith("/chart-preview")),
 		false,
 	);
 	await activate();
+	assert.equal(element("center-panel-visualize").hidden, false);
+	assert.equal(requests.filter(({ path }) => path.endsWith("/charts")).length, chartListsBefore + 1);
+	await waitFor(() => element("chart-saved-status").textContent?.includes("No saved charts") === true);
+	assert.equal(requests.filter(({ path }) => path.endsWith("/chart-preview")).length, 0);
 	assert.equal(element<HTMLButtonElement>("chart-render").disabled, true);
 	assert.match(element("chart-studio").textContent ?? "", /current saved profile is required/);
 	element("chart-profile-direction").click();
@@ -574,4 +581,60 @@ test("frozen JSON, SVG and HTML downloads revoke object URLs and edits invalidat
 	assert.match(await blobs[2].text(), /<html/i);
 	change("chart-x", "2");
 	assert.equal(element<HTMLButtonElement>("chart-export-left-json").disabled, true);
+});
+
+test("external saved-chart refresh invalidates the lazy list without changing chart selection", async (t) => {
+	const browser = new TestWindow({ url: "http://localhost:4310" });
+	const document = browser.document as unknown as Document;
+	const panel = document.createElement("section");
+	panel.setAttribute("role", "tabpanel");
+	const container = document.createElement("div");
+	panel.append(container);
+	document.body.append(panel);
+	const requests: string[] = [];
+	let values: ChartRecord[] = [];
+	const controller = initializeChartStudio(container, {
+		async api<T>(path: string): Promise<T> {
+			requests.push(path);
+			return values as T;
+		},
+		onProfile() {},
+	});
+	t.after(async () => {
+		controller.dispose();
+		await browser.happyDOM.close();
+	});
+	controller.update({ projectId: project.id, dataset, profile });
+	await waitFor(
+		() => container.querySelector("#chart-saved-status")?.textContent?.includes("No saved charts") === true,
+	);
+	const selection = controller.getSelection();
+	const spec = container.querySelector("#chart-json-left")!.textContent;
+	panel.hidden = true;
+	values = [
+		{
+			id: "chat-chart",
+			projectId: project.id,
+			datasetId: dataset.id,
+			name: "Chart from chat",
+			createdAt: timestamp,
+			updatedAt: timestamp,
+			spec: { ...defaultChartSpec(dataset.currentVersionId), x: 0 },
+		},
+	];
+	const before = requests.length;
+	await controller.refreshSaved();
+	assert.equal(requests.length, before);
+	panel.hidden = false;
+	await waitFor(() => container.querySelector("#chart-saved-status")?.textContent?.includes("1 saved") === true);
+	assert.equal(requests.length, before + 1);
+	assert.match(container.querySelector("#chart-saved-list")!.textContent ?? "", /Chart from chat/);
+	assert.deepEqual(controller.getSelection(), selection);
+	assert.equal(container.querySelector("#chart-json-left")!.textContent, spec);
+	assert.equal(
+		requests.some((path) => path.endsWith("/chart-preview")),
+		false,
+	);
+	await controller.refreshSaved();
+	assert.equal(requests.length, before + 2);
 });

@@ -180,6 +180,6 @@ test("HTTP chat streams frozen references through Pi and resumes after restart",
 	assert.ok(resumed);
 	assert.equal(resumed.state, "ready", resumed.error ?? undefined);
 	assert.equal(resumed.messages.length, 4);
-	assert.equal(resumed.sessionFile, completed.sessionFile);
+	assert.notEqual(resumed.sessionFile, completed.sessionFile);
 	assert.deepEqual(resumed.scope, completed.scope);
 });

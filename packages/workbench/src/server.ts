@@ -316,6 +316,82 @@ export async function startWorkbench(options: WorkbenchOptions): Promise<Workben
 						json(response, 200, await conversations.events(projectId, datasetId, conversationId));
 						return;
 					}
+					if (conversationId && parts[7] === "proposals") {
+						if (parts.length === 8 && method === "GET") {
+							json(response, 200, await store.renameProposals(projectId, datasetId, conversationId));
+							return;
+						}
+						const proposalId = parts[8];
+						if (proposalId && parts.length === 10 && method === "POST") {
+							if (parts[9] === "apply") {
+								json(
+									response,
+									200,
+									await store.applyRenameProposal(
+										projectId,
+										datasetId,
+										conversationId,
+										proposalId,
+										await readMetadata(request),
+									),
+								);
+								return;
+							}
+							if (parts[9] === "preview" || parts[9] === "reject") {
+								if (
+									request.headers["transfer-encoding"] !== undefined ||
+									Number(request.headers["content-length"] ?? 0) !== 0
+								)
+									throw new WorkbenchError(400, "This proposal action does not accept a request body.");
+								json(
+									response,
+									200,
+									parts[9] === "preview"
+										? await store.previewRenameProposal(projectId, datasetId, conversationId, proposalId)
+										: await store.rejectRenameProposal(projectId, datasetId, conversationId, proposalId),
+								);
+								return;
+							}
+						}
+					}
+					if (conversationId && parts[7] === "chart-proposals") {
+						if (parts.length === 8 && method === "GET") {
+							json(response, 200, await store.chartProposals(projectId, datasetId, conversationId));
+							return;
+						}
+						const proposalId = parts[8];
+						if (proposalId && parts.length === 10 && method === "POST") {
+							if (parts[9] === "save") {
+								json(
+									response,
+									200,
+									await store.saveChartProposal(
+										projectId,
+										datasetId,
+										conversationId,
+										proposalId,
+										await readMetadata(request),
+									),
+								);
+								return;
+							}
+							if (parts[9] === "preview" || parts[9] === "reject") {
+								if (
+									request.headers["transfer-encoding"] !== undefined ||
+									Number(request.headers["content-length"] ?? 0) !== 0
+								)
+									throw new WorkbenchError(400, "This proposal action does not accept a request body.");
+								json(
+									response,
+									200,
+									parts[9] === "preview"
+										? await store.previewChartProposal(projectId, datasetId, conversationId, proposalId)
+										: await store.rejectChartProposal(projectId, datasetId, conversationId, proposalId),
+								);
+								return;
+							}
+						}
+					}
 					if (conversationId && parts.length === 8 && parts[7] === "messages" && method === "POST") {
 						const input = await readMetadata(request);
 						response.writeHead(200, {

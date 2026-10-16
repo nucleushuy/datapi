@@ -199,7 +199,7 @@ test(
 		assert.deepEqual(await readFile(artifactPath), artifact);
 		const database = new DatabaseSync(join(state.root, "workbench.sqlite"));
 		try {
-			assert.equal(database.prepare("PRAGMA user_version").get()?.user_version, 7);
+			assert.equal(database.prepare("PRAGMA user_version").get()?.user_version, 9);
 		} finally {
 			database.close();
 		}
@@ -476,9 +476,11 @@ test("Pi conversations persist a frozen scope and relay streamed deltas", { time
 	delete legacy.scope.context.attachedFiles;
 	delete legacy.scope.context.executionResults;
 	legacy.scope.contextHash = createHash("sha256").update(JSON.stringify(legacy.scope.context)).digest("hex");
-	await state.store.putConversation(legacy);
 	await reopened.close();
 	await state.store.close();
+	const legacyMetadata = new MetadataStore(join(state.root, "workbench.sqlite"));
+	legacyMetadata.putConversation(legacy);
+	legacyMetadata.close();
 	state.store = new WorkbenchStore(state.root);
 	await state.store.init();
 	const oldScope = await state.store.conversation(project.id, dataset.id, conversation.id);
@@ -590,7 +592,9 @@ test(
 		conversation.scope.contextHash = createHash("sha256")
 			.update(JSON.stringify(conversation.scope.context))
 			.digest("hex");
-		await state.store.putConversation(conversation);
+		const oversizedMetadata = new MetadataStore(join(state.root, "workbench.sqlite"));
+		oversizedMetadata.putConversation(conversation);
+		oversizedMetadata.close();
 		const before = JSON.stringify(await state.store.conversation(project.id, dataset.id, conversation.id));
 		await assert.rejects(service.send(project.id, dataset.id, conversation.id, { message: "Inspect" }), status(413));
 		assert.equal(JSON.stringify(await state.store.conversation(project.id, dataset.id, conversation.id)), before);

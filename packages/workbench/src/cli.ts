@@ -23,7 +23,7 @@ if (values.help) {
 		const app = await startWorkbench({ port, dataDir: resolve(values["data-dir"]) });
 		console.log(`Workbench ready at ${app.url}`);
 		console.log(
-			"Datasets stay local. Chat shares read-only metadata, messages and explicitly approved text files with its chosen provider; no automatic row samples or file execution.",
+			"Datasets stay local. Chat shares metadata, messages and explicitly approved text files; no automatic row samples or file execution. Rename proposals require local preview and explicit user approval.",
 		);
 		const stop = () => {
 			void app.close().catch(() => {

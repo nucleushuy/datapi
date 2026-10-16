@@ -11,8 +11,74 @@ import {
 	isAssistantApiKey,
 	isAssistantUsage,
 } from "./assistant-driver.ts";
-import type { ConversationDriver } from "./conversation-contracts.ts";
+import { type DatasetColumn, MAX_COLUMNS } from "./contracts.ts";
+import { parseChartProposal } from "./conversation-chart.ts";
+import type { ConversationDriver, RenameProposalInput } from "./conversation-contracts.ts";
 import { WorkbenchError } from "./storage.ts";
+import { parseTransformSpec } from "./transform-spec.ts";
+
+export const CONVERSATION_PROPOSAL_LIMIT = 8;
+export type RenameProposalValidator = (value: unknown) => value is RenameProposalInput;
+
+/** Validates only disclosed names; the server separately checks the complete, current schema. */
+export function renameProposalValidator(scope: unknown): RenameProposalValidator | undefined {
+	if (scope === undefined) return undefined;
+	if (
+		!record(scope) ||
+		!keys(scope, ["datasetVersionId", "columns"]) ||
+		typeof scope.datasetVersionId !== "string" ||
+		!/^[a-zA-Z0-9_-]{1,80}$/u.test(scope.datasetVersionId) ||
+		!Array.isArray(scope.columns) ||
+		scope.columns.length === 0 ||
+		scope.columns.length > MAX_COLUMNS
+	)
+		throw error("request");
+	const schema: DatasetColumn[] = [];
+	const indexes = new Set<number>();
+	for (const column of scope.columns) {
+		if (
+			!record(column) ||
+			!keys(column, ["index", "name"]) ||
+			typeof column.index !== "number" ||
+			!Number.isSafeInteger(column.index) ||
+			column.index < 0 ||
+			column.index >= MAX_COLUMNS ||
+			indexes.has(column.index) ||
+			typeof column.name !== "string" ||
+			column.name.includes("\0")
+		)
+			throw error("request");
+		indexes.add(column.index);
+		// Rename validation uses only index/name; these local type placeholders are never disclosed.
+		schema.push({ index: column.index, name: column.name, sourceType: "", basicType: "text" });
+	}
+	const versionId = scope.datasetVersionId;
+	return (value): value is RenameProposalInput => {
+		if (
+			!record(value) ||
+			!keys(value, ["toolCallId", "datasetVersionId", "column", "name"]) ||
+			typeof value.toolCallId !== "string" ||
+			value.toolCallId.length === 0 ||
+			value.toolCallId.length > 256 ||
+			value.toolCallId.includes("\0")
+		)
+			return false;
+		try {
+			parseTransformSpec(
+				{
+					version: 1,
+					datasetVersionId: value.datasetVersionId,
+					operation: { kind: "rename", column: value.column, name: value.name },
+				},
+				schema,
+				versionId,
+			);
+			return true;
+		} catch {
+			return false;
+		}
+	};
+}
 
 type ConversationChild = ChildProcessByStdio<Writable, Readable, null>;
 type LaunchConversationWorker = () => ConversationChild;
@@ -117,6 +183,7 @@ export class PiConversationDriver implements ConversationDriver {
 		if (signal.aborted) throw error("cancelled");
 		const request = JSON.stringify({ ...input, authPath: this.#authPath });
 		if (Buffer.byteLength(request) > ASSISTANT_REQUEST_BYTES) throw error("request");
+		const validateProposal = renameProposalValidator(input.renameScope);
 		const task = new Promise<ConversationResult>((resolve, reject) => {
 			let child: ConversationChild;
 			try {
@@ -132,6 +199,7 @@ export class PiConversationDriver implements ConversationDriver {
 			let fragments: Buffer[] = [];
 			let result: ConversationResult | undefined;
 			let failure: WorkbenchError | undefined;
+			const proposalIds = new Set<string>();
 			const decoder = new TextDecoder("utf-8", { fatal: true });
 			const stop = (code: keyof typeof ASSISTANT_WORKER_ERRORS) => {
 				if (!failure) {
@@ -148,6 +216,43 @@ export class PiConversationDriver implements ConversationDriver {
 					if (outputBytes > ASSISTANT_OUTPUT_BYTES) return stop("output");
 					output += frame.delta;
 					onEvent({ type: "text", delta: frame.delta });
+				} else if (
+					frame.type === "rename_proposal" &&
+					keys(frame, ["type", "toolCallId", "datasetVersionId", "column", "name"])
+				) {
+					const { type: _type, ...proposal } = frame;
+					if (
+						!validateProposal?.(proposal) ||
+						proposalIds.size >= CONVERSATION_PROPOSAL_LIMIT ||
+						proposalIds.has(proposal.toolCallId)
+					)
+						throw Error();
+					outputBytes += Buffer.byteLength(JSON.stringify(frame));
+					if (outputBytes > ASSISTANT_OUTPUT_BYTES) return stop("output");
+					proposalIds.add(proposal.toolCallId);
+					onEvent({ type: "rename_proposal", ...proposal });
+				} else if (
+					frame.type === "chart_proposal" &&
+					keys(frame, [
+						"type",
+						"toolCallId",
+						"title",
+						"explanation",
+						"confidence",
+						"evidenceRefs",
+						"affectedColumns",
+						"spec",
+					])
+				) {
+					if (!input.chartScope) throw Error();
+					const { type: _type, ...value } = frame;
+					const { basis: _basis, ...proposal } = parseChartProposal(value, input.chartScope);
+					if (proposalIds.size >= CONVERSATION_PROPOSAL_LIMIT || proposalIds.has(proposal.toolCallId))
+						throw Error();
+					outputBytes += Buffer.byteLength(JSON.stringify(frame));
+					if (outputBytes > ASSISTANT_OUTPUT_BYTES) return stop("output");
+					proposalIds.add(proposal.toolCallId);
+					onEvent({ type: "chart_proposal", ...proposal });
 				} else if (
 					frame.type === "result" &&
 					keys(frame, ["type", "text", "sessionFile", "usage"]) &&
