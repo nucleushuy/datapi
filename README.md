@@ -6,7 +6,7 @@ Data Pi brings dataset exploration, profiling, visualization, reproducible trans
 
 The goal is a keyboard-first workbench for data scientists—not a generic dashboard or an unrestricted coding agent. Dataset versions, columns, charts, evidence, and transformation records are explicit, inspectable objects.
 
-> **Status:** working local development application, Windows x64 first. Dataset tools and read-only streaming chat are implemented. Agent-controlled operations, arbitrary code execution, model training, and multi-user hosting are not implemented.
+> **Status:** working local development application, Windows x64 first. Dataset tools, streaming Pi chat, and user-reviewed rename and chart proposals are implemented. Arbitrary code execution, model training, and multi-user hosting are not implemented.
 
 ## What works today
 
@@ -19,6 +19,8 @@ The goal is a keyboard-first workbench for data scientists—not a generic dashb
 | Save and export | Version-bound chart configurations; PNG, SVG, HTML, JSON, and inspectable Python plotting code |
 | Transform | Fixed validated operations, full-dataset impact previews, inspectable DuckDB SQL, separate approval, immutable output versions, undo/redo |
 | Discuss | Right-side Pi chat, incremental replies, persistent sessions and follow-ups, cancellation, provider/model selection |
+| Propose a rename | Pi proposes one disclosed column rename; local preview, exact-preview approval or rejection, persistent audit and output version |
+| Propose a chart | Pi proposes a typed chart with frozen evidence; local rendered preview, inspectable JSON/Python, separate save or reject, persistent audit |
 | Attach context | Dataset/profile/column/filter/chart metadata, explicitly approved text files, and selected safe metadata from prior transformation results |
 | Navigate | Resizable panels, command palette, keyboard navigation, themes, and responsive layouts |
 
@@ -63,6 +65,10 @@ Catalog hydration downloads model metadata, not datasets. A full monorepo build 
 4. Open **Data → Transform** to preview a fixed operation. Inspect its SQL and impact, approve that exact preview, then apply it.
 5. Open **Chat → Connect a provider**, enter a literal API key, and select a model. Review **Context to share**, then send a question.
 6. Optionally attach text files or select prior transformation results before the first message. File contents require explicit consent. Follow-ups reuse the saved context; choose **New chat** to change it.
+7. Ask Pi to rename a disclosed column. In its proposal card, choose **Preview**, inspect the SQL and counts, then check approval and choose **Approve and apply**, or **Reject**. After applying, use **New chat** for the new version; **Data → Transform** provides history and undo/redo.
+8. Ask Pi for a chart using disclosed fields. Choose **Preview chart**, inspect its evidence, sampling, warnings, chart specification and generated Python, then approve the exact preview and **Save chart**, or **Reject**. Saving adds a configuration to **Visualize → Saved chart configurations**; it does not change the dataset. Reload retains the decision and preview receipt, but requires a new local preview before approval.
+
+For example, a failure-rate comparison can use time on X, a validated numeric 0/1 failure indicator on Y, mean aggregation, and machine type as a facet. Disclose these fields before starting the chat. The mean is a rate only when that binary encoding is valid; profile evidence and chart previews do not establish causation.
 
 Use **Commands** or **Ctrl+K** for navigation and layout actions. Panel separators and tab groups support keyboard navigation. On narrow screens, the side panels stack below the workspace rather than compressing it into an unusable layout.
 
@@ -74,8 +80,9 @@ Use **Commands** or **Ctrl+K** for navigation and layout actions. Panel separato
 - Text attachments support UTF-8 `.py`, `.sql`, `.txt`, `.md`, and `.json`: at most **8 files, 8 KiB each, 32 KiB total**. They are reference text and are never executed.
 - Saved chat context includes exact attachment contents, UTF-8 byte lengths, and SHA-256 hashes. Reloading or following up does not silently substitute current files or a newer dataset version.
 - Selected transformation results share only scoped IDs, status, version references, operation kind, timestamps, and numeric impact counts—not SQL, preview cells, or raw errors. A preview is not an applied change.
-- Pi sessions have no filesystem, shell, Python, or application execution tools. Chat cannot apply transformations or approve its own actions.
-- Manual transformations require a separate, exact-preview approval. Original uploads remain unchanged; undo/redo switches immutable versions.
+- Pi's chat tools are `propose_column_rename` and `propose_chart`. They propose operations on the frozen disclosed schema; they cannot preview, apply, approve, save, read files, run shell/Python, or execute arbitrary SQL. Their acknowledgement means awaiting local review, not an applied or saved operation.
+- Manual transformations and chat rename proposals require separate, exact-preview approval. Preview SQL and counts stay local; proposal cards show no cell samples. Stale or rejected proposals cannot apply. Decisions and output versions persist across restart; original uploads remain unchanged and undo/redo switches immutable versions.
+- Chart proposals validate complete specifications, declared fields and evidence references. Evidence links provide traceability, not proof; uncited proposals are labeled hypotheses with confidence capped at 50%. Local preview results, rows, generated plotting code and decisions are not returned to the provider. Save requires explicit approval of the exact current preview; expired, altered, stale and rejected previews cannot save. Chart configuration and audit publication are atomic.
 - Chart exports can contain bounded dataset values and category labels. Generated Python reproduces the exported chart data; the application does not execute it.
 
 ### Credentials and local storage
@@ -94,6 +101,7 @@ The server binds to loopback and checks local request authority, origin, and a p
 - Transformations: full-dataset computation with exact row/schema/NULL impact and at most 20 illustrative input/output preview rows—not an aligned row-by-row diff. Previews expire after ten minutes; applied versions and their operation records persist.
 - Analytical workers: a **five-minute deadline** and **1 GiB Windows JobObject committed-memory limit**, plus DuckDB buffer/spill and artifact limits. These are resource bounds, not permission isolation for untrusted code.
 - Chat: **96 KiB** initial system/context payload, **16 KiB** messages, bounded transcript/output, and a five-minute response deadline. Starting a chat also requires its initial request to fit the 4,000-character selection limit. Larger requests fail explicitly instead of being silently truncated.
+- Rename and chart proposals share limits of **8 per successful turn** and **100 retained per conversation**, without pruning audit history. Renames share existing transformation limits. Chart preview receipts expire after **30 minutes**; saved charts use the existing 100-per-dataset limit. A busy analytical worker rejects the action explicitly; retry Preview after it finishes.
 
 Profiles, charts, and transformations retain version identity and disclose limitations. AI explanations remain inferences; they do not replace observed evidence or validate a transformation.
 
@@ -108,7 +116,7 @@ Node.js workbench host — projects, context, approvals, persistence
         |                              |
         v                              v
 Bounded analytical workers        Pi SDK subprocess
-DuckDB + fixed operations         streamed, read-only conversations
+DuckDB + fixed operations         streamed chat + typed proposals
         |                              |
         v                              v
 Immutable dataset versions        Saved Pi session history
@@ -116,26 +124,28 @@ Immutable dataset versions        Saved Pi session history
                   Local data root
 ```
 
-The web application lives in [`packages/workbench`](packages/workbench). It reuses the repository's npm workspaces, TypeScript tooling, esbuild, and Pi SDK rather than adding a separate agent engine or frontend framework. SQLite application records and Pi conversation history have distinct roles. The SDK reopens the saved Pi session for subsequent turns; a worker is not kept alive indefinitely.
+The web application lives in [`packages/workbench`](packages/workbench). It reuses the repository's npm workspaces, TypeScript tooling, esbuild, and Pi SDK rather than adding a separate agent engine or frontend framework. SQLite application records and Pi conversation history have distinct roles. Each subsequent turn forks the saved SDK session into a separate snapshot, selected only when its transcript and proposals commit successfully. Failed or cancelled turns cannot alter the published history; workers are not kept alive indefinitely.
 
 ## Development and verification
 
 Run from the repository root with a supported Node version:
 
 ```bash
-node --test packages/workbench/test/assistant-context.test.ts packages/workbench/test/assistant-storage.test.ts packages/workbench/test/assistant-driver.test.ts packages/workbench/test/conversation-driver.test.ts packages/workbench/test/conversation-http.test.ts packages/workbench/test/browser/conversation.test.ts
+node --import tsx --test --test-concurrency=2 packages/workbench/test/assistant-context.test.ts packages/workbench/test/assistant-storage.test.ts packages/workbench/test/conversation-driver.test.ts packages/workbench/test/conversation-http.test.ts packages/workbench/test/conversation-proposals.test.ts packages/workbench/test/conversation-rename-http.test.ts packages/workbench/test/conversation-chart.test.ts packages/workbench/test/conversation-chart-http.test.ts packages/workbench/test/conversation-chart-proposals.test.ts packages/workbench/test/browser/conversation.test.ts packages/workbench/test/browser/chart-studio.test.ts packages/workbench/test/browser/shell.test.ts packages/workbench/test/chart-storage.test.ts packages/workbench/test/transform-storage.test.ts packages/workbench/test/transform-server.test.ts
 npm run check
 ```
 
-These focused tests cover context validation, attachment consent and persistence, SDK/subprocess streaming, cancellation, protocol errors, HTTP body limits, and restart/follow-up behavior. They use Pi's deterministic local test provider, not paid API calls. `npm run check` formats/lints, checks dependency/import/lock consistency, typechecks Node/browser code, and checks browser bundling; it does not run tests.
+These focused tests cover context and attachment boundaries, SDK/subprocess streaming, cancellation, failed-turn isolation, HTTP body limits, rename and chart review, stale and altered previews, transaction rollback, restart, undo, and browser behavior. They use Pi's deterministic local test provider, not paid API calls. The serial SDK subprocess suite has an eight-minute deadline. `npm run check` formats/lints, checks dependency/import/lock consistency, typechecks Node/browser code, and checks browser bundling; it does not run tests.
 
-The attachment/chat checkpoint was also exercised in a real browser: partial replies before completion, explicit file consent, frozen references after reload, follow-ups, cancellation, and desktop/mobile layout. Hosted-provider inference has **not** been verified by that local-provider smoke test.
+Latest chart-proposal validation: **146 tests passed across these 15 files**, with no failures, cancellations or skips. Final `npm run check` passed with no fixes or diagnostics. Node emits its existing experimental SQLite/MockTimers notices during tests.
+
+Real chart browser smoke covered a faceted failure-rate line chart, frozen evidence, local rendering, explicit save, Visualize list refresh, keyboard rejection, reload/server-restart persistence, busy-worker retry, reload-without-render approval blocking, and 1440px/390px layouts. Earlier rename and attachment smoke covered exact approval, stale blocking, undo/redo, file consent, incremental text, frozen references and cancellation. Hosted-provider inference has **not** been verified by these local-provider smoke tests.
 
 See [AGENTS.md](AGENTS.md) for development rules, [CONTRIBUTING.md](CONTRIBUTING.md) for contribution policy, and the [implementation plan](docs/data-science-workbench-plan.md) for historical stages and future direction.
 
 ## What is next
 
-The next bounded feature is to connect **one validated local operation to the Pi tool loop**, with a visible proposal, explicit user approval, and a durable result/audit record. Read-only chat and existing manual transformations are not that workflow yet.
+Next, verify natural-language chart selection and evidence quality with an explicitly authorized hosted-provider call. Pi can propose renames and charts; approval, preview and execution results remain local and are not automatically sent back to the provider.
 
 Arbitrary generated-code execution requires a separately verified OS sandbox. Model training, reports, hosted identity, multi-user authorization, and deployment remain later work. The Models view does not train a model today.
 

@@ -4,11 +4,13 @@ import type { AssistantUsage } from "./assistant-contracts.ts";
 import { parseAssistantSelection } from "./assistant-validation.ts";
 import type { Dataset } from "./contracts.ts";
 import {
+	type ChartProposalInput,
 	CONVERSATION_MESSAGE_BYTES,
 	CONVERSATION_TRANSCRIPT_BYTES,
 	type Conversation,
 	type ConversationDriver,
 	type ConversationEvent,
+	type RenameProposalInput,
 } from "./conversation-contracts.ts";
 import type { DatasetProfile } from "./profile-contracts.ts";
 import { WorkbenchError, type WorkbenchStore } from "./storage.ts";
@@ -156,7 +158,12 @@ export class ConversationService {
 		if (Buffer.byteLength(JSON.stringify(conversation.messages)) > CONVERSATION_TRANSCRIPT_BYTES)
 			throw new WorkbenchError(409, "Conversation history reached its limit. Start a new conversation to continue.");
 		const dataset = await this.#store.getDataset(projectId, datasetId);
-		if (dataset.currentVersionId !== conversation.scope.datasetVersionId)
+		if (
+			dataset.currentVersionId !== conversation.scope.datasetVersionId ||
+			hash(conversation.scope.context) !== conversation.scope.contextHash ||
+			dataset.versions.find((version) => version.id === dataset.currentVersionId)?.facts?.artifactSha256 !==
+				conversation.scope.context.dataset.artifactHash
+		)
 			throw new WorkbenchError(
 				409,
 				"This conversation is attached to an older dataset version. Start a new conversation to share the current version.",
@@ -165,7 +172,6 @@ export class ConversationService {
 		if (conversation.sessionFile) payload.user = message.trim();
 		if (conversation.title === "New chat") conversation.title = message.trim().slice(0, 120);
 		const controller = new AbortController();
-		this.#active.set(id, controller);
 		const now = new Date().toISOString();
 		const messageId = randomUUID();
 		conversation.messages.push({
@@ -179,6 +185,10 @@ export class ConversationService {
 		conversation.error = null;
 		conversation.updatedAt = now;
 		await this.#store.putConversation(conversation);
+		this.#active.set(id, controller);
+		const proposals: RenameProposalInput[] = [];
+		const chartProposals: ChartProposalInput[] = [];
+		let proposalError = false;
 		const buffer: ConversationEvent[] = [];
 		this.#events.set(id, buffer);
 		const emit = (event: ConversationEvent): void => {
@@ -195,23 +205,84 @@ export class ConversationService {
 					sessionDir: await this.#store.conversationSessionDir(projectId, datasetId),
 					system: payload.system,
 					user: payload.user,
+					renameScope: {
+						datasetVersionId: conversation.scope.datasetVersionId,
+						columns: conversation.scope.context.schema.map(({ index, name }) => ({ index, name })),
+					},
+					chartScope: structuredClone(conversation.scope.context),
 				},
 				(event) => {
-					emit({ type: "text", conversationId: id, messageId, delta: event.delta });
+					if (event.type === "text") emit({ type: "text", conversationId: id, messageId, delta: event.delta });
+					else if (event.type === "rename_proposal") {
+						if (
+							proposals.length + chartProposals.length >= 8 ||
+							Reflect.ownKeys(event).length !== 5 ||
+							!["type", "toolCallId", "datasetVersionId", "column", "name"].every((key) =>
+								Object.hasOwn(event, key),
+							)
+						)
+							proposalError = true;
+						else
+							proposals.push({
+								toolCallId: event.toolCallId,
+								datasetVersionId: event.datasetVersionId,
+								column: event.column,
+								name: event.name,
+							});
+					} else if (event.type === "chart_proposal") {
+						if (
+							proposals.length + chartProposals.length >= 8 ||
+							Reflect.ownKeys(event).length !== 8 ||
+							![
+								"type",
+								"toolCallId",
+								"title",
+								"explanation",
+								"confidence",
+								"evidenceRefs",
+								"affectedColumns",
+								"spec",
+							].every((key) => Object.hasOwn(event, key))
+						)
+							proposalError = true;
+						else
+							chartProposals.push(
+								structuredClone({
+									toolCallId: event.toolCallId,
+									title: event.title,
+									explanation: event.explanation,
+									confidence: event.confidence,
+									evidenceRefs: event.evidenceRefs,
+									affectedColumns: event.affectedColumns,
+									spec: event.spec,
+								}),
+							);
+					} else proposalError = true;
 				},
 				controller.signal,
 			);
-			conversation.messages.push({
-				id: randomUUID(),
-				role: "assistant",
-				text: result.text,
-				createdAt: new Date().toISOString(),
-				state: "complete",
-			});
-			conversation.sessionFile = result.sessionFile;
-			conversation.usage = mergeUsage(conversation.usage, result.usage);
-			conversation.state = "ready";
-			conversation.error = null;
+			if (controller.signal.aborted) throw new WorkbenchError(409, "Assistant response was cancelled.");
+			if (proposalError) throw new WorkbenchError(400, "Assistant returned invalid or excessive proposals.");
+			const completed: Conversation = {
+				...structuredClone(conversation),
+				messages: [
+					...structuredClone(conversation.messages),
+					{
+						id: randomUUID(),
+						role: "assistant",
+						text: result.text,
+						createdAt: new Date().toISOString(),
+						state: "complete",
+					},
+				],
+				sessionFile: result.sessionFile,
+				usage: mergeUsage(conversation.usage, result.usage),
+				state: "ready",
+				error: null,
+				updatedAt: new Date().toISOString(),
+			};
+			await this.#store.putConversation(completed, proposals, chartProposals);
+			Object.assign(conversation, completed);
 		} catch (error) {
 			conversation.state = "failed";
 			conversation.error = controller.signal.aborted
@@ -222,11 +293,11 @@ export class ConversationService {
 			conversation.messages[conversation.messages.length - 1]!.state = controller.signal.aborted
 				? "cancelled"
 				: "failed";
-		} finally {
 			conversation.updatedAt = new Date().toISOString();
+			await this.#store.putConversation(conversation);
+		} finally {
 			this.#active.delete(id);
 			emit({ type: "status", conversationId: id, state: conversation.state, error: conversation.error });
-			await this.#store.putConversation(conversation);
 		}
 		return structuredClone(conversation);
 	}

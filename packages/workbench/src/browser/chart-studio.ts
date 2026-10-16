@@ -31,6 +31,7 @@ export interface ChartStudioController {
 	setBlocked(blocked: boolean): void;
 	getSelection(): { selectedColumns: number[]; filters: ChartFilter[]; revision: number };
 	applySpec(spec: ChartSpec): void;
+	refreshSaved(): Promise<void>;
 	dispose(): void;
 }
 type Pane = "left" | "right";
@@ -1014,7 +1015,7 @@ export function initializeChartStudio(container: HTMLElement, options: StudioOpt
 			savedStatus.textContent = "Saved charts unavailable.";
 			savedError.textContent = options.message?.(error) ?? "Could not load saved charts. Use Reload saved charts.";
 		} finally {
-			if (owner === generation) {
+			if (owner === generation && listAbort === controller) {
 				listAbort = null;
 				syncControls();
 			}
@@ -1308,6 +1309,14 @@ export function initializeChartStudio(container: HTMLElement, options: StudioOpt
 			void loadList();
 		},
 		clear,
+		async refreshSaved() {
+			if (disposed || !context) return;
+			listed = false;
+			skipNextVisibleList = false;
+			listAbort?.abort();
+			listAbort = null;
+			await loadList();
+		},
 		getSelection() {
 			if (!state || !context) return { selectedColumns: [], filters: [], revision: contextRevision };
 			const spec = state[active];

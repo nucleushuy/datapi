@@ -13,6 +13,7 @@ import {
 } from "./assistant-contracts.ts";
 import type { ChartRecord, ChartResult, ChartSpec } from "./chart-contracts.ts";
 import { parseChartSpec } from "./chart-spec.ts";
+import { chartColumns } from "./chart-validation.ts";
 import type {
 	Dataset,
 	DatasetFormat,
@@ -32,7 +33,16 @@ import {
 	PROFILE_VERSION,
 	SCHEMA_VERSION,
 } from "./contracts.ts";
-import type { Conversation } from "./conversation-contracts.ts";
+import { parseChartProposal } from "./conversation-chart.ts";
+import type {
+	ChartProposal,
+	ChartProposalInput,
+	Conversation,
+	ConversationChartPreview,
+	ConversationChartSaved,
+	RenameProposal,
+	RenameProposalInput,
+} from "./conversation-contracts.ts";
 import { MetadataStore, type TransformDraft } from "./metadata.ts";
 import { type DatasetProfile, PROFILER_VERSION, type ProfileInput } from "./profile-contracts.ts";
 import { isDatasetProfile } from "./profile-validation.ts";
@@ -54,6 +64,11 @@ const UPLOAD_TIMEOUT_MS = 10 * 60_000;
 const MAX_TRANSFORM_DRAFTS = 4;
 const MAX_TRANSFORM_RECORDS = 100;
 const MAX_TRANSFORM_HISTORY_BYTES = 16 * 1024 * 1024;
+const CHART_PROPOSAL_PREVIEW_TTL_MS = 30 * 60_000;
+
+function proposalHash(value: unknown): string {
+	return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
 
 export class WorkbenchError extends Error {
 	readonly status: number;
@@ -158,6 +173,7 @@ export class WorkbenchStore {
 	#transformWork?: ActiveTransform;
 	#transformExpiry?: NodeJS.Timeout;
 	#transformCleanup?: Promise<void>;
+	readonly #proposalOperations = new Map<string, { conversationId: string; done: Deferred<void> }>();
 	#active?: ActiveJob;
 	#ready = false;
 	#closing = false;
@@ -190,6 +206,7 @@ export class WorkbenchStore {
 			await mkdir(join(this.#root, "transform-drafts"), { recursive: true });
 			await this.#upgradeVersionFacts();
 			this.#metadata.recoverTransforms();
+			this.#metadata.recoverConversations();
 			await this.#recoverTransformDrafts();
 			this.#ready = true;
 		} catch (error) {
@@ -545,6 +562,16 @@ export class WorkbenchStore {
 		value: unknown,
 		signal?: AbortSignal,
 	): Promise<TransformPreview> {
+		return this.#previewTransform(projectId, datasetId, value, signal);
+	}
+
+	async #previewTransform(
+		projectId: string,
+		datasetId: string,
+		value: unknown,
+		signal?: AbortSignal,
+		proposal?: RenameProposal,
+	): Promise<TransformPreview> {
 		const dataset = this.#dataset(projectId, datasetId);
 		if (
 			typeof value === "object" &&
@@ -601,7 +628,11 @@ export class WorkbenchStore {
 				result: null,
 				error: null,
 			};
-			this.#metadata!.putTransform(record);
+			const started = record;
+			this.#metadata!.transaction(() => {
+				this.#metadata!.putTransform(started);
+				if (proposal) this.#metadata!.linkRenamePreview(proposal, started.id);
+			});
 			this.#checkTransform(work.controller.signal);
 			const revision = this.#metadata!.transformTimeline(projectId, datasetId).revision;
 			const input = await this.#profileInput(dataset, work.controller.signal);
@@ -661,6 +692,15 @@ export class WorkbenchStore {
 			this.#metadata!.transaction(() => {
 				this.#metadata!.putTransform(saved);
 				this.#metadata!.putTransformDraft(draft);
+				if (proposal) {
+					proposal.preview = this.#renamePreview(draft.id, draft.expiresAt, result.impact);
+					this.#proposalAudit(proposal, "previewed", "previewed", "system");
+					this.#metadata!.putRenameProposal(proposal);
+					this.#metadata!.sealRenamePreview(
+						proposal,
+						createHash("sha256").update(JSON.stringify(result.impact)).digest("hex"),
+					);
+				}
 			});
 			retained = true;
 			return { id: draft.id, projectId, datasetId, createdAt, expiresAt: draft.expiresAt, impact: result.impact };
@@ -694,6 +734,15 @@ export class WorkbenchStore {
 	}
 
 	async applyTransform(projectId: string, datasetId: string, value: unknown): Promise<Dataset> {
+		return this.#applyTransform(projectId, datasetId, value);
+	}
+
+	async #applyTransform(
+		projectId: string,
+		datasetId: string,
+		value: unknown,
+		proposal?: RenameProposal,
+	): Promise<Dataset> {
 		const dataset = this.#dataset(projectId, datasetId);
 		if (
 			typeof value !== "object" ||
@@ -711,6 +760,15 @@ export class WorkbenchStore {
 		validateId(value.previewId);
 		const record = this.#metadata!.transform(projectId, datasetId, value.previewId);
 		if (!record) throw new WorkbenchError(404, "Preview was not found in this dataset.");
+		const owner = this.#metadata!.renameProposalForPreview(projectId, datasetId, record.id);
+		if (
+			owner &&
+			(!proposal ||
+				owner.id !== proposal.id ||
+				owner.conversationId !== proposal.conversationId ||
+				owner.state !== "applying")
+		)
+			throw new WorkbenchError(409, "Approve this proposal from its conversation after reviewing the preview.");
 		const work = this.#beginTransform();
 		let published: string | undefined;
 		let committed = false;
@@ -786,6 +844,19 @@ export class WorkbenchStore {
 				});
 				this.#metadata!.deleteTransformDraft(projectId, datasetId, record.id);
 				this.#metadata!.putTransform(record);
+				if (proposal) {
+					const current = this.#metadata!.renameProposal(
+						projectId,
+						datasetId,
+						proposal.conversationId,
+						proposal.id,
+					);
+					if (!current || current.state !== "applying" || current.preview?.id !== record.id)
+						throw new WorkbenchError(409, "Proposal approval changed before publication.");
+					current.outputVersionId = version.id;
+					this.#proposalAudit(current, "applied", "applied", "system");
+					this.#metadata!.putRenameProposal(current);
+				}
 			});
 			committed = true;
 			return updated;
@@ -1019,8 +1090,12 @@ export class WorkbenchStore {
 		return conversation;
 	}
 
-	async putConversation(conversation: Conversation): Promise<void> {
-		await this.getDataset(conversation.projectId, conversation.datasetId);
+	async putConversation(
+		conversation: Conversation,
+		proposals: RenameProposalInput[] = [],
+		chartInputs: ChartProposalInput[] = [],
+	): Promise<void> {
+		const dataset = this.#dataset(conversation.projectId, conversation.datasetId);
 		this.#assertReady();
 		validateId(conversation.id);
 		if (
@@ -1038,7 +1113,747 @@ export class WorkbenchStore {
 			)
 		)
 			throw new WorkbenchError(400, "Conversation state is invalid.");
-		this.#metadata!.transaction(() => this.#metadata!.putConversation(conversation));
+		const previous = this.#metadata!.conversation(conversation.projectId, conversation.datasetId, conversation.id);
+		if (previous && !isDeepStrictEqual(previous.scope, conversation.scope))
+			throw new WorkbenchError(409, "Conversation disclosure scope is immutable.");
+		if (
+			(conversation.state === "running" && previous?.state === "running") ||
+			[...this.#proposalOperations.values()].some((operation) => operation.conversationId === conversation.id)
+		)
+			throw new WorkbenchError(409, "A conversation response or proposal operation is already active.");
+		if (!Array.isArray(proposals) || !Array.isArray(chartInputs) || proposals.length + chartInputs.length > 8)
+			throw new WorkbenchError(409, "A response may propose at most eight operations.");
+		const retained = [
+			...this.#metadata!.renameProposals(conversation.projectId, conversation.datasetId, conversation.id),
+			...this.#metadata!.chartProposals(conversation.projectId, conversation.datasetId, conversation.id),
+		];
+		const count = proposals.length + chartInputs.length;
+		if ((conversation.state === "running" && retained.length >= 100) || retained.length + count > 100)
+			throw new WorkbenchError(409, "This conversation has reached its proposal audit limit. Start a new chat.");
+		if (count && (previous?.state !== "running" || conversation.state !== "ready"))
+			throw new WorkbenchError(409, "Only a successful conversation response can save proposals.");
+		const toolCalls = new Set(retained.map((proposal) => proposal.toolCallId));
+		const created = proposals.map((input): RenameProposal => {
+			this.#renameSpec(conversation, dataset, input, true);
+			if (toolCalls.has(input.toolCallId)) throw new WorkbenchError(409, "A tool call already has a proposal.");
+			toolCalls.add(input.toolCallId);
+			const now = new Date().toISOString();
+			return {
+				id: randomUUID(),
+				projectId: conversation.projectId,
+				datasetId: conversation.datasetId,
+				conversationId: conversation.id,
+				toolCallId: input.toolCallId,
+				inputVersionId: input.datasetVersionId,
+				column: input.column,
+				oldName: dataset.schema.find((column) => column.index === input.column)!.name,
+				name: input.name,
+				state: "proposed",
+				createdAt: now,
+				updatedAt: now,
+				preview: null,
+				outputVersionId: null,
+				error: null,
+				audit: [{ at: now, action: "proposed", actor: "pi" }],
+			};
+		});
+		const charts = chartInputs.map((input): ChartProposal => {
+			const parsed = this.#chartProposalSpec(conversation, dataset, input, true);
+			if (toolCalls.has(parsed.toolCallId)) throw new WorkbenchError(409, "A tool call already has a proposal.");
+			toolCalls.add(parsed.toolCallId);
+			const now = new Date().toISOString();
+			return {
+				...parsed,
+				id: randomUUID(),
+				projectId: conversation.projectId,
+				datasetId: conversation.datasetId,
+				conversationId: conversation.id,
+				inputVersionId: parsed.spec.datasetVersionId,
+				state: "proposed",
+				createdAt: now,
+				updatedAt: now,
+				preview: null,
+				chartId: null,
+				error: null,
+				audit: [{ at: now, action: "proposed", actor: "pi" }],
+			};
+		});
+		this.#metadata!.transaction(() => {
+			this.#metadata!.putConversation(conversation);
+			for (const proposal of created) this.#metadata!.putRenameProposal(proposal);
+			for (const proposal of charts)
+				this.#metadata!.putChartProposal(proposal, proposalHash(this.#chartProposalInput(proposal)));
+		});
+	}
+
+	#chartProposalInput(proposal: ChartProposal): ChartProposalInput {
+		return {
+			toolCallId: proposal.toolCallId,
+			title: proposal.title,
+			explanation: proposal.explanation,
+			confidence: proposal.confidence,
+			evidenceRefs: proposal.evidenceRefs,
+			affectedColumns: proposal.affectedColumns,
+			spec: proposal.spec,
+		};
+	}
+
+	#chartProposalSpec(
+		conversation: Conversation,
+		dataset: Dataset,
+		input: ChartProposalInput,
+		current: boolean,
+	): ChartProposalInput & { basis: ChartProposal["basis"] } {
+		const { scope } = conversation;
+		const { context } = scope;
+		const version = dataset.versions.find((entry) => entry.id === scope.datasetVersionId);
+		if (
+			scope.projectId !== dataset.projectId ||
+			scope.datasetId !== dataset.id ||
+			context.project.id !== dataset.projectId ||
+			context.dataset.id !== dataset.id ||
+			context.dataset.versionId !== scope.datasetVersionId ||
+			proposalHash(context) !== scope.contextHash ||
+			!version?.facts ||
+			version.facts.artifactSha256 !== context.dataset.artifactHash ||
+			context.schema.some(
+				(column) =>
+					!isDeepStrictEqual(
+						column,
+						version.facts!.schema.find((entry) => entry.index === column.index),
+					),
+			) ||
+			(current && !isDeepStrictEqual(dataset.schema, version.facts.schema))
+		)
+			throw new WorkbenchError(409, "The frozen conversation disclosure no longer matches this dataset.");
+		if (current && dataset.currentVersionId !== scope.datasetVersionId)
+			throw new WorkbenchError(409, "Dataset version changed. Start a new conversation for the current version.");
+		const parsed = parseChartProposal(input, context);
+		this.#chartName(parsed.title);
+		parsed.spec = this.#chartSpec(dataset, parsed.spec, current);
+		if (
+			!chartColumns(parsed.spec, version.facts.schema).every((column) =>
+				parsed.affectedColumns.includes(column.index),
+			)
+		)
+			throw new WorkbenchError(400, "Every chart sample field must be a disclosed affected column.");
+		return parsed;
+	}
+
+	#chartProposalAudit(
+		proposal: ChartProposal,
+		state: ChartProposal["state"],
+		action: ChartProposal["audit"][number]["action"],
+		actor: ChartProposal["audit"][number]["actor"],
+	): void {
+		proposal.state = state;
+		proposal.updatedAt = new Date().toISOString();
+		proposal.error = null;
+		proposal.audit.push({ at: proposal.updatedAt, action, actor });
+	}
+
+	#readChartProposal(projectId: string, datasetId: string, conversationId: string, id: string): ChartProposal {
+		const { dataset, conversation } = this.#proposalContext(projectId, datasetId, conversationId);
+		validateId(id);
+		const proposal = this.#metadata!.chartProposal(projectId, datasetId, conversationId, id);
+		if (!proposal) throw new WorkbenchError(404, "Chart proposal was not found in this conversation.");
+		if (
+			proposal.projectId !== projectId ||
+			proposal.datasetId !== datasetId ||
+			proposal.conversationId !== conversationId ||
+			proposal.id !== id ||
+			proposal.inputVersionId !== conversation.scope.datasetVersionId
+		)
+			throw new WorkbenchError(409, "Stored proposal scope is invalid.");
+		const input = this.#chartProposalInput(proposal);
+		const seal = this.#metadata!.chartProposalSeal(proposal);
+		if (seal.proposalHash !== proposalHash(input))
+			throw new WorkbenchError(409, "Stored chart proposal no longer matches its original specification.");
+		const parsed = this.#chartProposalSpec(conversation, dataset, input, false);
+		if (parsed.basis !== proposal.basis || !isDeepStrictEqual(parsed, { ...input, basis: proposal.basis }))
+			throw new WorkbenchError(409, "Stored chart proposal no longer matches its disclosure.");
+		if (!["saved", "rejected", "stale"].includes(proposal.state) && !this.#proposalOperations.has(id)) {
+			if (
+				dataset.currentVersionId !== proposal.inputVersionId ||
+				(proposal.state === "previewed" &&
+					seal.previewRevision !== this.#metadata!.transformTimeline(projectId, datasetId).revision)
+			) {
+				this.#chartProposalAudit(proposal, "stale", "stale", "system");
+				proposal.error = "Dataset version or history changed. Start a new conversation for the current version.";
+				this.#metadata!.putChartProposal(proposal);
+			} else if (
+				proposal.state === "previewed" &&
+				(!proposal.preview ||
+					seal.previewHash !== proposalHash(proposal.preview) ||
+					!Number.isFinite(Date.parse(proposal.preview.expiresAt)) ||
+					Date.parse(proposal.preview.expiresAt) <= Date.now())
+			) {
+				this.#chartProposalAudit(proposal, "failed", "failed", "system");
+				proposal.error = "Preview is no longer available. Preview again before approving.";
+				proposal.preview = null;
+				this.#metadata!.transaction(() => {
+					this.#metadata!.putChartProposal(proposal);
+					this.#metadata!.sealChartPreview(proposal, null, null);
+				});
+			}
+		}
+		return proposal;
+	}
+
+	async chartProposals(projectId: string, datasetId: string, conversationId: string): Promise<ChartProposal[]> {
+		this.#proposalContext(projectId, datasetId, conversationId);
+		return this.#metadata!.chartProposals(projectId, datasetId, conversationId).map((proposal) =>
+			this.#readChartProposal(projectId, datasetId, conversationId, proposal.id),
+		);
+	}
+
+	async chartProposal(
+		projectId: string,
+		datasetId: string,
+		conversationId: string,
+		id: string,
+	): Promise<ChartProposal> {
+		return this.#readChartProposal(projectId, datasetId, conversationId, id);
+	}
+
+	#beginChartProposal(projectId: string, datasetId: string, conversationId: string, id: string): ChartProposal {
+		const { conversation } = this.#proposalContext(projectId, datasetId, conversationId);
+		if (
+			conversation.state === "running" ||
+			[...this.#proposalOperations.values()].some((operation) => operation.conversationId === conversationId)
+		)
+			throw new WorkbenchError(409, "Wait for the active conversation or proposal operation to finish.");
+		const proposal = this.#readChartProposal(projectId, datasetId, conversationId, id);
+		if (["saved", "rejected", "previewing"].includes(proposal.state))
+			throw new WorkbenchError(409, "This proposal is terminal or already has an operation in progress.");
+		if (proposal.audit.length >= 250) throw new WorkbenchError(409, "This proposal has reached its audit limit.");
+		this.#proposalOperations.set(id, { conversationId, done: deferred<void>() });
+		return proposal;
+	}
+
+	#failChartProposal(proposal: ChartProposal, error: unknown): WorkbenchError {
+		const failure =
+			error instanceof WorkbenchError
+				? error
+				: new WorkbenchError(500, "Chart operation failed. Nothing was saved; preview again before approving.");
+		const current = this.#metadata!.chartProposal(
+			proposal.projectId,
+			proposal.datasetId,
+			proposal.conversationId,
+			proposal.id,
+		);
+		if (current && !["saved", "rejected"].includes(current.state)) {
+			this.#chartProposalAudit(current, current.state === "stale" ? "stale" : "failed", "failed", "system");
+			current.error = failure.message;
+			current.preview = null;
+			this.#metadata!.transaction(() => {
+				this.#metadata!.putChartProposal(current);
+				this.#metadata!.sealChartPreview(current, null, null);
+			});
+		}
+		return failure;
+	}
+
+	async previewChartProposal(
+		projectId: string,
+		datasetId: string,
+		conversationId: string,
+		id: string,
+	): Promise<ConversationChartPreview> {
+		const proposal = this.#beginChartProposal(projectId, datasetId, conversationId, id);
+		try {
+			if (proposal.state === "stale")
+				throw new WorkbenchError(409, "This proposal is stale. Start a new conversation.");
+			const { dataset, conversation } = this.#proposalContext(projectId, datasetId, conversationId);
+			const { spec } = this.#chartProposalSpec(conversation, dataset, this.#chartProposalInput(proposal), true);
+			const revision = this.#metadata!.transformTimeline(projectId, datasetId).revision;
+			proposal.preview = null;
+			this.#chartProposalAudit(proposal, "previewing", "preview_requested", "local-user");
+			this.#metadata!.transaction(() => {
+				this.#metadata!.putChartProposal(proposal);
+				this.#metadata!.sealChartPreview(proposal, null, null);
+			});
+			const chart = await this.chartPreview(projectId, datasetId, spec);
+			const current = this.#proposalContext(projectId, datasetId, conversationId);
+			this.#chartProposalSpec(current.conversation, current.dataset, this.#chartProposalInput(proposal), true);
+			if (
+				!isDeepStrictEqual(this.#readChartProposal(projectId, datasetId, conversationId, id), proposal) ||
+				this.#metadata!.transformTimeline(projectId, datasetId).revision !== revision ||
+				!isDeepStrictEqual(chart.spec, spec) ||
+				chart.datasetVersionHash !== conversation.scope.context.dataset.artifactHash ||
+				![chart.populationRows, chart.sampleSize].every((count) => Number.isSafeInteger(count) && count >= 0) ||
+				chart.sampleSize > chart.populationRows ||
+				typeof chart.sampled !== "boolean"
+			)
+				throw new WorkbenchError(409, "Dataset or chart proposal changed while preparing the preview.");
+			proposal.preview = {
+				id: randomUUID(),
+				expiresAt: new Date(Date.now() + CHART_PROPOSAL_PREVIEW_TTL_MS).toISOString(),
+				datasetVersionHash: chart.datasetVersionHash,
+				specHash: proposalHash(spec),
+				populationRows: chart.populationRows,
+				sampleSize: chart.sampleSize,
+				sampled: chart.sampled,
+			};
+			this.#chartProposalAudit(proposal, "previewed", "previewed", "system");
+			this.#metadata!.transaction(() => {
+				this.#metadata!.putChartProposal(proposal);
+				this.#metadata!.sealChartPreview(proposal, proposalHash(proposal.preview), revision);
+			});
+			return { proposal, chart };
+		} catch (error) {
+			throw this.#failChartProposal(proposal, error);
+		} finally {
+			this.#finishProposal(id);
+		}
+	}
+
+	async rejectChartProposal(
+		projectId: string,
+		datasetId: string,
+		conversationId: string,
+		id: string,
+	): Promise<ChartProposal> {
+		const proposal = this.#beginChartProposal(projectId, datasetId, conversationId, id);
+		try {
+			this.#chartProposalAudit(proposal, "rejected", "rejected", "local-user");
+			this.#metadata!.transaction(() => {
+				this.#metadata!.putChartProposal(proposal);
+				this.#metadata!.sealChartPreview(proposal, null, null);
+			});
+			return proposal;
+		} finally {
+			this.#finishProposal(id);
+		}
+	}
+
+	async saveChartProposal(
+		projectId: string,
+		datasetId: string,
+		conversationId: string,
+		id: string,
+		value: unknown,
+	): Promise<ConversationChartSaved> {
+		if (
+			!value ||
+			typeof value !== "object" ||
+			Array.isArray(value) ||
+			Reflect.ownKeys(value).length !== 2 ||
+			!Object.hasOwn(value, "previewId") ||
+			!Object.hasOwn(value, "approved") ||
+			!("previewId" in value) ||
+			!("approved" in value) ||
+			typeof value.previewId !== "string" ||
+			value.approved !== true
+		)
+			throw new WorkbenchError(400, "Provide only the exact preview identifier and explicit approval.");
+		validateId(value.previewId);
+		const proposal = this.#beginChartProposal(projectId, datasetId, conversationId, id);
+		const reviewed = proposal.state === "previewed" && proposal.preview?.id === value.previewId;
+		let work: ActiveTransform | undefined;
+		try {
+			if (!reviewed) throw new WorkbenchError(409, "Review the current proposal preview before approving.");
+			work = this.#beginTransform();
+			this.#chartProposalAudit(proposal, "previewed", "approved", "local-user");
+			this.#metadata!.putChartProposal(proposal);
+			const { dataset, conversation } = this.#proposalContext(projectId, datasetId, conversationId);
+			const { spec } = this.#chartProposalSpec(conversation, dataset, this.#chartProposalInput(proposal), true);
+			const input = await this.#profileInput(dataset, work.controller.signal);
+			this.#checkTransform(work.controller.signal);
+			let saved!: ConversationChartSaved;
+			this.#metadata!.transaction(() => {
+				const current = this.#readChartProposal(projectId, datasetId, conversationId, id);
+				const scope = this.#proposalContext(projectId, datasetId, conversationId);
+				this.#chartProposalSpec(scope.conversation, scope.dataset, this.#chartProposalInput(current), true);
+				const seal = this.#metadata!.chartProposalSeal(current);
+				if (
+					!isDeepStrictEqual(current, proposal) ||
+					!current.preview ||
+					seal.previewHash !== proposalHash(current.preview) ||
+					seal.previewRevision !== this.#metadata!.transformTimeline(projectId, datasetId).revision ||
+					!Number.isFinite(Date.parse(current.preview.expiresAt)) ||
+					Date.parse(current.preview.expiresAt) <= Date.now() ||
+					current.preview.specHash !== proposalHash(spec) ||
+					current.preview.datasetVersionHash !== input.datasetVersionHash ||
+					input.datasetVersionHash !== conversation.scope.context.dataset.artifactHash
+				)
+					throw new WorkbenchError(409, "The approved preview no longer matches this proposal. Preview again.");
+				if (this.#metadata!.chartCount(projectId, datasetId) >= 100)
+					throw new WorkbenchError(
+						409,
+						"This dataset already has 100 saved charts. Delete a chart before saving another.",
+					);
+				const now = new Date().toISOString();
+				const chart: ChartRecord = {
+					id: randomUUID(),
+					projectId,
+					datasetId,
+					name: this.#chartName(current.title),
+					spec,
+					createdAt: now,
+					updatedAt: now,
+				};
+				current.chartId = chart.id;
+				this.#chartProposalAudit(current, "saved", "saved", "system");
+				this.#metadata!.putChart(chart);
+				this.#metadata!.putChartProposal(current);
+				saved = { proposal: current, chart };
+			});
+			return saved;
+		} catch (error) {
+			if (reviewed) throw this.#failChartProposal(proposal, error);
+			throw error;
+		} finally {
+			if (work) {
+				this.#transformWork = undefined;
+				work.done.resolve();
+			}
+			this.#finishProposal(id);
+		}
+	}
+
+	#renameSpec(
+		conversation: Conversation,
+		dataset: Dataset,
+		input: RenameProposalInput,
+		current: boolean,
+	): TransformSpec {
+		if (
+			!input ||
+			typeof input !== "object" ||
+			Array.isArray(input) ||
+			Reflect.ownKeys(input).length !== 4 ||
+			!["toolCallId", "datasetVersionId", "column", "name"].every((key) => Object.hasOwn(input, key)) ||
+			typeof input.toolCallId !== "string" ||
+			!input.toolCallId.trim() ||
+			input.toolCallId.length > 256 ||
+			input.toolCallId.includes("\0")
+		)
+			throw new WorkbenchError(400, "Column rename proposal is invalid.");
+		const scope = conversation.scope;
+		const context = scope.context;
+		const version = dataset.versions.find((entry) => entry.id === scope.datasetVersionId);
+		if (
+			scope.projectId !== dataset.projectId ||
+			scope.datasetId !== dataset.id ||
+			context.project.id !== dataset.projectId ||
+			context.dataset.id !== dataset.id ||
+			context.dataset.versionId !== scope.datasetVersionId ||
+			createHash("sha256").update(JSON.stringify(context)).digest("hex") !== scope.contextHash ||
+			!version?.facts ||
+			version.facts.artifactSha256 !== context.dataset.artifactHash
+		)
+			throw new WorkbenchError(409, "The frozen conversation disclosure no longer matches this dataset.");
+		if (
+			input.datasetVersionId !== scope.datasetVersionId ||
+			(current && dataset.currentVersionId !== scope.datasetVersionId)
+		)
+			throw new WorkbenchError(409, "Dataset version changed. Start a new conversation for the current version.");
+		const schema = current ? dataset.schema : version.facts.schema;
+		const disclosed = context.schema.find((column) => column.index === input.column);
+		if (
+			!disclosed ||
+			!isDeepStrictEqual(
+				disclosed,
+				schema.find((column) => column.index === input.column),
+			)
+		)
+			throw new WorkbenchError(400, "The rename column was not disclosed in this conversation.");
+		try {
+			return parseTransformSpec(
+				{
+					version: 1,
+					datasetVersionId: input.datasetVersionId,
+					operation: { kind: "rename", column: input.column, name: input.name },
+				},
+				schema,
+				input.datasetVersionId,
+			);
+		} catch {
+			throw new WorkbenchError(400, "Column rename is invalid for the full dataset schema.");
+		}
+	}
+
+	#proposalAudit(
+		proposal: RenameProposal,
+		state: RenameProposal["state"],
+		action: RenameProposal["audit"][number]["action"],
+		actor: RenameProposal["audit"][number]["actor"],
+	): void {
+		proposal.state = state;
+		proposal.updatedAt = new Date().toISOString();
+		proposal.error = null;
+		proposal.audit.push({ at: proposal.updatedAt, action, actor });
+	}
+
+	#renamePreview(
+		id: string,
+		expiresAt: string,
+		impact: NonNullable<TransformRecord["result"]>,
+	): NonNullable<RenameProposal["preview"]> {
+		if (
+			typeof impact.sql !== "string" ||
+			Buffer.byteLength(impact.sql) > 64 * 1024 ||
+			![impact.inputRows, impact.rowCount, impact.affectedRows].every(
+				(count) => Number.isSafeInteger(count) && count >= 0,
+			)
+		)
+			throw new WorkbenchError(500, "Rename preview returned invalid bounded results.");
+		return {
+			id,
+			expiresAt,
+			sql: impact.sql,
+			inputRows: impact.inputRows,
+			outputRows: impact.rowCount,
+			affectedRows: impact.affectedRows,
+		};
+	}
+
+	#proposalContext(
+		projectId: string,
+		datasetId: string,
+		conversationId: string,
+	): { dataset: Dataset; conversation: Conversation } {
+		const dataset = this.#dataset(projectId, datasetId);
+		validateId(conversationId);
+		const conversation = this.#metadata!.conversation(projectId, datasetId, conversationId);
+		if (!conversation) throw new WorkbenchError(404, "Conversation was not found in this dataset.");
+		return { dataset, conversation };
+	}
+
+	#readRenameProposal(projectId: string, datasetId: string, conversationId: string, id: string): RenameProposal {
+		const { dataset, conversation } = this.#proposalContext(projectId, datasetId, conversationId);
+		validateId(id);
+		const proposal = this.#metadata!.renameProposal(projectId, datasetId, conversationId, id);
+		if (!proposal) throw new WorkbenchError(404, "Rename proposal was not found in this conversation.");
+		if (
+			proposal.projectId !== projectId ||
+			proposal.datasetId !== datasetId ||
+			proposal.conversationId !== conversationId ||
+			proposal.id !== id
+		)
+			throw new WorkbenchError(409, "Stored proposal scope is invalid.");
+		this.#renameSpec(
+			conversation,
+			dataset,
+			{
+				toolCallId: proposal.toolCallId,
+				datasetVersionId: proposal.inputVersionId,
+				column: proposal.column,
+				name: proposal.name,
+			},
+			false,
+		);
+		if (
+			proposal.oldName !== conversation.scope.context.schema.find((column) => column.index === proposal.column)?.name
+		)
+			throw new WorkbenchError(409, "Stored proposal column no longer matches its disclosure.");
+		if (!["applied", "rejected", "stale"].includes(proposal.state) && !this.#proposalOperations.has(id)) {
+			if (dataset.currentVersionId !== proposal.inputVersionId) {
+				this.#proposalAudit(proposal, "stale", "stale", "system");
+				proposal.error = "Dataset version changed. Start a new conversation for the current version.";
+				this.#metadata!.putRenameProposal(proposal);
+			} else if (proposal.state === "previewed" && proposal.preview) {
+				const draft = this.#metadata!.transformDraft(projectId, datasetId, proposal.preview.id);
+				const record = this.#metadata!.transform(projectId, datasetId, proposal.preview.id);
+				if (draft && draft.revision !== this.#metadata!.transformTimeline(projectId, datasetId).revision) {
+					this.#proposalAudit(proposal, "stale", "stale", "system");
+					proposal.error = "Dataset history changed after preview. Start a new conversation.";
+					this.#metadata!.putRenameProposal(proposal);
+				} else if (!draft || record?.state !== "previewed" || Date.parse(draft.expiresAt) <= Date.now()) {
+					this.#proposalAudit(proposal, "failed", "failed", "system");
+					proposal.error = "Preview is no longer available. Preview again before approving.";
+					this.#metadata!.putRenameProposal(proposal);
+				}
+			}
+		}
+		return proposal;
+	}
+
+	async renameProposals(projectId: string, datasetId: string, conversationId: string): Promise<RenameProposal[]> {
+		this.#proposalContext(projectId, datasetId, conversationId);
+		return this.#metadata!.renameProposals(projectId, datasetId, conversationId).map((proposal) =>
+			this.#readRenameProposal(projectId, datasetId, conversationId, proposal.id),
+		);
+	}
+
+	async renameProposal(
+		projectId: string,
+		datasetId: string,
+		conversationId: string,
+		id: string,
+	): Promise<RenameProposal> {
+		return this.#readRenameProposal(projectId, datasetId, conversationId, id);
+	}
+
+	#beginProposal(projectId: string, datasetId: string, conversationId: string, id: string): RenameProposal {
+		const { conversation } = this.#proposalContext(projectId, datasetId, conversationId);
+		if (
+			conversation.state === "running" ||
+			[...this.#proposalOperations.values()].some((operation) => operation.conversationId === conversationId)
+		)
+			throw new WorkbenchError(409, "Wait for the active conversation or proposal operation to finish.");
+		const proposal = this.#readRenameProposal(projectId, datasetId, conversationId, id);
+		if (["applied", "rejected", "previewing", "applying"].includes(proposal.state))
+			throw new WorkbenchError(409, "This proposal is terminal or already has an operation in progress.");
+		if (proposal.audit.length >= 250) throw new WorkbenchError(409, "This proposal has reached its audit limit.");
+		this.#proposalOperations.set(id, { conversationId, done: deferred<void>() });
+		return proposal;
+	}
+
+	#finishProposal(id: string): void {
+		this.#proposalOperations.get(id)?.done.resolve();
+		this.#proposalOperations.delete(id);
+	}
+
+	#failProposal(proposal: RenameProposal, error: unknown): void {
+		const current = this.#metadata!.renameProposal(
+			proposal.projectId,
+			proposal.datasetId,
+			proposal.conversationId,
+			proposal.id,
+		);
+		if (!current || current.state === "applied" || current.state === "rejected") return;
+		this.#proposalAudit(current, current.state === "stale" ? "stale" : "failed", "failed", "system");
+		current.error =
+			error instanceof WorkbenchError
+				? error.message
+				: "Rename operation failed. Nothing was applied; preview again before approving.";
+		this.#metadata!.putRenameProposal(current);
+	}
+
+	async previewRenameProposal(
+		projectId: string,
+		datasetId: string,
+		conversationId: string,
+		id: string,
+	): Promise<RenameProposal> {
+		const proposal = this.#beginProposal(projectId, datasetId, conversationId, id);
+		try {
+			if (proposal.state === "stale")
+				throw new WorkbenchError(409, "This proposal is stale. Start a new conversation.");
+			const { dataset, conversation } = this.#proposalContext(projectId, datasetId, conversationId);
+			const spec = this.#renameSpec(
+				conversation,
+				dataset,
+				{
+					toolCallId: proposal.toolCallId,
+					datasetVersionId: proposal.inputVersionId,
+					column: proposal.column,
+					name: proposal.name,
+				},
+				true,
+			);
+			if (proposal.preview && this.#metadata!.transformDraft(projectId, datasetId, proposal.preview.id)) {
+				try {
+					await this.discardTransform(projectId, datasetId, proposal.preview.id);
+				} catch (error) {
+					if (this.#metadata!.transformDraft(projectId, datasetId, proposal.preview.id)) throw error;
+				}
+			}
+			proposal.preview = null;
+			this.#proposalAudit(proposal, "previewing", "preview_requested", "local-user");
+			this.#metadata!.putRenameProposal(proposal);
+			await this.#previewTransform(projectId, datasetId, spec, undefined, proposal);
+			return this.#metadata!.renameProposal(projectId, datasetId, conversationId, id)!;
+		} catch (error) {
+			this.#failProposal(proposal, error);
+			throw error;
+		} finally {
+			this.#finishProposal(id);
+		}
+	}
+
+	async rejectRenameProposal(
+		projectId: string,
+		datasetId: string,
+		conversationId: string,
+		id: string,
+	): Promise<RenameProposal> {
+		const proposal = this.#beginProposal(projectId, datasetId, conversationId, id);
+		try {
+			if (proposal.preview && this.#metadata!.transformDraft(projectId, datasetId, proposal.preview.id)) {
+				try {
+					await this.discardTransform(projectId, datasetId, proposal.preview.id);
+				} catch (error) {
+					if (this.#metadata!.transformDraft(projectId, datasetId, proposal.preview.id)) throw error;
+				}
+			}
+			this.#proposalAudit(proposal, "rejected", "rejected", "local-user");
+			this.#metadata!.putRenameProposal(proposal);
+			return proposal;
+		} catch (error) {
+			this.#failProposal(proposal, error);
+			throw error;
+		} finally {
+			this.#finishProposal(id);
+		}
+	}
+
+	async applyRenameProposal(
+		projectId: string,
+		datasetId: string,
+		conversationId: string,
+		id: string,
+		value: unknown,
+	): Promise<{ proposal: RenameProposal; dataset: Dataset }> {
+		if (
+			!value ||
+			typeof value !== "object" ||
+			Array.isArray(value) ||
+			Reflect.ownKeys(value).length !== 2 ||
+			!("previewId" in value) ||
+			!("approved" in value) ||
+			typeof value.previewId !== "string" ||
+			value.approved !== true
+		)
+			throw new WorkbenchError(400, "Provide only the exact preview identifier and explicit approval.");
+		validateId(value.previewId);
+		const proposal = this.#beginProposal(projectId, datasetId, conversationId, id);
+		const reviewed = proposal.state === "previewed" && proposal.preview?.id === value.previewId;
+		try {
+			if (!reviewed) throw new WorkbenchError(409, "Review the current proposal preview before approving.");
+			this.#proposalAudit(proposal, "applying", "approved", "local-user");
+			this.#metadata!.putRenameProposal(proposal);
+			const { dataset, conversation } = this.#proposalContext(projectId, datasetId, conversationId);
+			const spec = this.#renameSpec(
+				conversation,
+				dataset,
+				{
+					toolCallId: proposal.toolCallId,
+					datasetVersionId: proposal.inputVersionId,
+					column: proposal.column,
+					name: proposal.name,
+				},
+				true,
+			);
+			const record = this.#metadata!.transform(projectId, datasetId, value.previewId);
+			const draft = this.#metadata!.transformDraft(projectId, datasetId, value.previewId);
+			if (
+				!draft ||
+				!record?.result ||
+				record.state !== "previewed" ||
+				!isDeepStrictEqual(record.spec, spec) ||
+				!isDeepStrictEqual(record.result.spec, spec) ||
+				record.inputVersionId !== proposal.inputVersionId ||
+				draft.inputHash !== conversation.scope.context.dataset.artifactHash ||
+				record.result.inputHash !== draft.inputHash ||
+				this.#metadata!.renamePreviewHash(proposal) !==
+					createHash("sha256").update(JSON.stringify(record.result)).digest("hex") ||
+				!isDeepStrictEqual(proposal.preview, this.#renamePreview(draft.id, draft.expiresAt, record.result))
+			)
+				throw new WorkbenchError(409, "The approved preview no longer matches this proposal. Preview again.");
+			const updated = await this.#applyTransform(projectId, datasetId, value, proposal);
+			return {
+				proposal: this.#metadata!.renameProposal(projectId, datasetId, conversationId, id)!,
+				dataset: updated,
+			};
+		} catch (error) {
+			if (reviewed) this.#failProposal(proposal, error);
+			throw error;
+		} finally {
+			this.#finishProposal(id);
+		}
 	}
 
 	async conversationSessionDir(projectId: string, datasetId: string): Promise<string> {
@@ -2093,6 +2908,7 @@ export class WorkbenchStore {
 
 	close(): Promise<void> {
 		this.#closing = true;
+		this.#chartController?.abort();
 		const transform = this.#transformWork;
 		if (transform && !transform.committing)
 			transform.controller.abort(new WorkbenchError(409, "Transformation was cancelled during shutdown."));
@@ -2105,6 +2921,7 @@ export class WorkbenchStore {
 		clearTimeout(this.#transformExpiry);
 		const transform = this.#transformWork;
 		if (transform) await transform.done.promise;
+		await Promise.all([...this.#proposalOperations.values()].map((operation) => operation.done.promise));
 		await this.#transformCleanup;
 		this.#chartController?.abort();
 		await this.#chartTask?.catch(() => {});

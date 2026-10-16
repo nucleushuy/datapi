@@ -223,12 +223,7 @@ const transformController = initializeTransform(ui.transformPanel, {
 		transformBusy = busy;
 		updateControls();
 	},
-	async onChanged(value) {
-		if (projectId !== value.projectId || datasetId !== value.id) return;
-		datasets = datasets.map((item) => (item.id === value.id ? value : item));
-		renderDatasetList();
-		await selectDataset(value.id, true);
-	},
+	onChanged: onDatasetChanged,
 });
 const chartStudio = initializeChartStudio(element("chart-studio"), {
 	api,
@@ -250,7 +245,23 @@ const conversation = initializeConversation(element("chat-workspace"), {
 	api,
 	stream: streamConversation,
 	message,
+	onChanged: onDatasetChanged,
+	async onChartSaved(chart) {
+		if (projectId !== chart.projectId || datasetId !== chart.datasetId) return;
+		await chartStudio.refreshSaved();
+	},
 });
+
+async function onDatasetChanged(value: Dataset): Promise<void> {
+	if (projectId !== value.projectId || datasetId !== value.id) return;
+	dataset = value;
+	richProfile = null;
+	const context = currentAssistantContext();
+	if (context) conversation.update(context);
+	datasets = datasets.map((item) => (item.id === value.id ? value : item));
+	renderDatasetList();
+	await selectDataset(value.id, true);
+}
 
 function currentAssistantContext(): ConversationUiContext | null {
 	if (!projectId || !dataset) return null;
@@ -511,9 +522,9 @@ function renderEmpty(): void {
 	updateControls();
 }
 
-function resetDataset(): void {
+function resetDataset(preserveConversation = false): void {
 	transformController.clear();
-	conversation.update(null);
+	if (!preserveConversation) conversation.update(null);
 	chartStudio.clear();
 	datasetVersion++;
 	previewVersion++;
@@ -631,7 +642,7 @@ async function selectDataset(id: string, preserveView = false): Promise<void> {
 	const owner = projectId;
 	const view = preserveView ? currentView : "preview";
 	selectionVersion++;
-	resetDataset();
+	resetDataset(preserveView && datasetId === id);
 	datasetId = id;
 	const request = ++datasetVersion;
 	const controller = new AbortController();
