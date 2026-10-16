@@ -1,19 +1,13 @@
-import { type ChildProcessByStdio, spawn } from "node:child_process";
-import { join } from "node:path";
-import type { Readable, Writable } from "node:stream";
-import { fileURLToPath } from "node:url";
-import { AuthStorage } from "../../coding-agent/src/core/auth-storage.ts";
-import { ASSISTANT_OUTPUT_BYTES, ASSISTANT_TIMEOUT_MS, type AssistantUsage } from "./assistant-contracts.ts";
-import {
-	ASSISTANT_PROVIDERS,
-	ASSISTANT_REQUEST_BYTES,
-	ASSISTANT_WORKER_ERRORS,
-	isAssistantApiKey,
-	isAssistantUsage,
-} from "./assistant-driver.ts";
+import { join, resolve } from "node:path";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { ASSISTANT_TIMEOUT_MS } from "./assistant-contracts.ts";
+import { ASSISTANT_WORKER_ERRORS } from "./assistant-driver.ts";
 import { type DatasetColumn, MAX_COLUMNS } from "./contracts.ts";
-import { parseChartProposal } from "./conversation-chart.ts";
-import type { ConversationDriver, RenameProposalInput } from "./conversation-contracts.ts";
+import type { ConversationDriver, ConversationDriverInput, ConversationModelResult, RenameProposalInput } from "./conversation-contracts.ts";
+import { ConversationRuntimeFailure, conversationRequest, createConversationSession, type ControlledConversationSession } from "./conversation-runtime.ts";
+import { CONVERSATION_CWD, controlledConversationSession } from "./conversation-session.ts";
+import type { SessionModelSelection, SessionModelState } from "./provider-contracts.ts";
+import type { ProviderService } from "./provider-service.ts";
 import { WorkbenchError } from "./storage.ts";
 import { parseTransformSpec } from "./transform-spec.ts";
 
@@ -80,14 +74,6 @@ export function renameProposalValidator(scope: unknown): RenameProposalValidator
 	};
 }
 
-type ConversationChild = ChildProcessByStdio<Writable, Readable, null>;
-type LaunchConversationWorker = () => ConversationChild;
-interface ConversationResult {
-	sessionFile: string;
-	text: string;
-	usage: AssistantUsage;
-}
-
 function error(code: keyof typeof ASSISTANT_WORKER_ERRORS): WorkbenchError {
 	const status =
 		code === "credentials"
@@ -107,222 +93,170 @@ function record(value: unknown): value is Record<string, unknown> {
 function keys(value: Record<string, unknown>, names: readonly string[]): boolean {
 	return Object.keys(value).length === names.length && names.every((name) => Object.hasOwn(value, name));
 }
-function launchWorker(): ConversationChild {
-	const env: NodeJS.ProcessEnv = {
-		PI_OFFLINE: "1",
-		PI_TELEMETRY: "0",
-		TSX_DISABLE_CACHE: "1",
-		TSX_TSCONFIG_PATH: fileURLToPath(new URL("../../../tsconfig.json", import.meta.url)),
-	};
-	for (const name of ["SystemRoot", "TEMP", "TMP"]) if (process.env[name] !== undefined) env[name] = process.env[name];
-	return spawn(
-		process.execPath,
-		[
-			"--import",
-			import.meta.resolve("tsx"),
-			"--max-old-space-size=256",
-			fileURLToPath(new URL("./conversation-sdk-worker.ts", import.meta.url)),
-		],
-		{
-			cwd: fileURLToPath(new URL("../../../", import.meta.url)),
-			windowsHide: true,
-			shell: false,
-			stdio: ["pipe", "pipe", "ignore"],
-			env,
-		},
-	);
+interface RetainedSession {
+ controlled: ControlledConversationSession;
+ fingerprint: string;
+ checkpoint: string | null;
 }
 
-/** Uses Pi's persisted sessions and credential store; this class only owns the bounded child transport. */
+/** One real retained AgentSession per conversation, all sharing the profile runtime. */
 export class PiConversationDriver implements ConversationDriver {
-	readonly #authPath: string;
-	readonly #credentials: AuthStorage;
-	readonly #launchWorker: LaunchConversationWorker;
-	readonly #stoppers = new Set<() => void>();
-	readonly #pending = new Set<Promise<unknown>>();
-	#closed = false;
-	constructor(dataDir: string, worker: LaunchConversationWorker = launchWorker) {
-		this.#authPath = join(dataDir, "pi", "auth.json");
-		this.#credentials = AuthStorage.create(this.#authPath);
-		this.#launchWorker = worker;
-	}
-	async authorizedProviders(): Promise<readonly string[]> {
-		const credentials = await this.#credentials.list();
-		return credentials
-			.filter((credential) => credential.type === "api_key" && ASSISTANT_PROVIDERS.has(credential.providerId))
-			.map((credential) => credential.providerId);
-	}
-	async setCredential(provider: unknown, apiKey: unknown): Promise<void> {
-		if (this.#closed) throw new WorkbenchError(503, "Assistant is closed.");
-		if (typeof provider !== "string" || !ASSISTANT_PROVIDERS.has(provider) || !isAssistantApiKey(apiKey))
-			throw new WorkbenchError(
-				400,
-				"Use a supported provider and a literal API key of 8–8192 characters; commands, environment templates, and whitespace are not accepted.",
-			);
-		await this.#credentials.modify(provider, async () => ({ type: "api_key", key: apiKey }));
-	}
-	async deleteCredential(provider: string): Promise<void> {
-		if (this.#closed) throw new WorkbenchError(503, "Assistant is closed.");
-		if (!ASSISTANT_PROVIDERS.has(provider)) throw new WorkbenchError(400, "Use a supported provider.");
-		await this.#credentials.delete(provider);
-	}
-	async close(): Promise<void> {
-		this.#closed = true;
-		for (const stop of this.#stoppers) stop();
-		await Promise.allSettled(this.#pending);
-	}
-	async chat(
-		input: Parameters<ConversationDriver["chat"]>[0],
-		onEvent: Parameters<ConversationDriver["chat"]>[1],
-		signal: AbortSignal,
-	): Promise<ConversationResult> {
-		if (this.#closed) throw new WorkbenchError(503, "Assistant is closed.");
-		if (signal.aborted) throw error("cancelled");
-		if (!(await this.authorizedProviders()).includes(input.provider)) throw error("credentials");
-		if (this.#closed) throw new WorkbenchError(503, "Assistant is closed.");
-		if (signal.aborted) throw error("cancelled");
-		const request = JSON.stringify({ ...input, authPath: this.#authPath });
-		if (Buffer.byteLength(request) > ASSISTANT_REQUEST_BYTES) throw error("request");
-		const validateProposal = renameProposalValidator(input.renameScope);
-		const task = new Promise<ConversationResult>((resolve, reject) => {
-			let child: ConversationChild;
-			try {
-				child = this.#launchWorker();
-			} catch {
-				reject(error("process"));
-				return;
-			}
-			let output = "";
-			let outputBytes = 0;
-			let receivedBytes = 0;
-			let lineBytes = 0;
-			let fragments: Buffer[] = [];
-			let result: ConversationResult | undefined;
-			let failure: WorkbenchError | undefined;
-			const proposalIds = new Set<string>();
-			const decoder = new TextDecoder("utf-8", { fatal: true });
-			const stop = (code: keyof typeof ASSISTANT_WORKER_ERRORS) => {
-				if (!failure) {
-					failure = error(code);
-					child.stdin.destroy();
-					child.kill("SIGKILL");
-				}
-			};
-			const consume = (raw: Buffer) => {
-				const frame: unknown = JSON.parse(decoder.decode(raw));
-				if (!record(frame) || result) throw Error();
-				if (frame.type === "text" && keys(frame, ["type", "delta"]) && typeof frame.delta === "string") {
-					outputBytes += Buffer.byteLength(frame.delta);
-					if (outputBytes > ASSISTANT_OUTPUT_BYTES) return stop("output");
-					output += frame.delta;
-					onEvent({ type: "text", delta: frame.delta });
-				} else if (
-					frame.type === "rename_proposal" &&
-					keys(frame, ["type", "toolCallId", "datasetVersionId", "column", "name"])
-				) {
-					const { type: _type, ...proposal } = frame;
-					if (
-						!validateProposal?.(proposal) ||
-						proposalIds.size >= CONVERSATION_PROPOSAL_LIMIT ||
-						proposalIds.has(proposal.toolCallId)
-					)
-						throw Error();
-					outputBytes += Buffer.byteLength(JSON.stringify(frame));
-					if (outputBytes > ASSISTANT_OUTPUT_BYTES) return stop("output");
-					proposalIds.add(proposal.toolCallId);
-					onEvent({ type: "rename_proposal", ...proposal });
-				} else if (
-					frame.type === "chart_proposal" &&
-					keys(frame, [
-						"type",
-						"toolCallId",
-						"title",
-						"explanation",
-						"confidence",
-						"evidenceRefs",
-						"affectedColumns",
-						"spec",
-					])
-				) {
-					if (!input.chartScope) throw Error();
-					const { type: _type, ...value } = frame;
-					const { basis: _basis, ...proposal } = parseChartProposal(value, input.chartScope);
-					if (proposalIds.size >= CONVERSATION_PROPOSAL_LIMIT || proposalIds.has(proposal.toolCallId))
-						throw Error();
-					outputBytes += Buffer.byteLength(JSON.stringify(frame));
-					if (outputBytes > ASSISTANT_OUTPUT_BYTES) return stop("output");
-					proposalIds.add(proposal.toolCallId);
-					onEvent({ type: "chart_proposal", ...proposal });
-				} else if (
-					frame.type === "result" &&
-					keys(frame, ["type", "text", "sessionFile", "usage"]) &&
-					frame.text === output &&
-					output.length > 0 &&
-					typeof frame.sessionFile === "string" &&
-					frame.sessionFile.length > 0 &&
-					frame.sessionFile.length <= 4096 &&
-					!frame.sessionFile.includes("\0") &&
-					isAssistantUsage(frame.usage)
-				) {
-					result = { sessionFile: frame.sessionFile, text: output, usage: frame.usage };
-				} else if (
-					frame.type === "error" &&
-					keys(frame, ["type", "code"]) &&
-					typeof frame.code === "string" &&
-					Object.hasOwn(ASSISTANT_WORKER_ERRORS, frame.code)
-				)
-					stop(frame.code as keyof typeof ASSISTANT_WORKER_ERRORS);
-				else throw Error();
-			};
-			const abort = () => stop("cancelled");
-			const timeout = setTimeout(() => stop("timeout"), ASSISTANT_TIMEOUT_MS);
-			this.#stoppers.add(abort);
-			signal.addEventListener("abort", abort, { once: true });
-			child.stdout.on("data", (chunk: Buffer) => {
-				if (failure) return;
-				try {
-					// Worst case: one-byte text deltas, JSON escaping, and the final repeated text.
-					receivedBytes += chunk.length;
-					if (receivedBytes > 40 * ASSISTANT_OUTPUT_BYTES + 8192) throw Error();
-					let start = 0;
-					while (start < chunk.length && !failure) {
-						if (result) throw Error();
-						const newline = chunk.indexOf(10, start);
-						const end = newline < 0 ? chunk.length : newline;
-						const piece = chunk.subarray(start, end);
-						lineBytes += piece.length;
-						if (lineBytes > 6 * ASSISTANT_OUTPUT_BYTES + 8192) throw Error();
-						fragments.push(piece);
-						if (newline < 0) break;
-						consume(fragments.length === 1 ? fragments[0] : Buffer.concat(fragments, lineBytes));
-						fragments = [];
-						lineBytes = 0;
-						start = newline + 1;
-					}
-				} catch {
-					stop("protocol");
-				}
-			});
-			child.once("error", () => stop("process"));
-			child.stdin.on("error", () => stop("process"));
-			child.stdout.on("error", () => stop("process"));
-			child.once("close", (code, exitSignal) => {
-				clearTimeout(timeout);
-				this.#stoppers.delete(abort);
-				signal.removeEventListener("abort", abort);
-				if (failure) reject(failure);
-				else if (code !== 0 || exitSignal !== null) reject(error("process"));
-				else if (lineBytes || !result) reject(error("protocol"));
-				else resolve(result);
-			});
-			if (signal.aborted) abort();
-			if (!failure) child.stdin.end(request);
-		});
-		this.#pending.add(task);
-		try {
-			return await task;
-		} finally {
-			this.#pending.delete(task);
-		}
-	}
+ readonly #providers: ProviderService;
+ readonly #sessions = new Map<string, RetainedSession>();
+ readonly #busy = new Set<string>();
+ readonly #stoppers = new Set<AbortController>();
+ readonly #pending = new Set<Promise<unknown>>();
+ #draft: Promise<ControlledConversationSession> | undefined;
+ #closed = false;
+ constructor(providers: ProviderService) { this.#providers = providers; }
+
+ async #operation<T>(key: string, action: () => Promise<T>): Promise<T> {
+  if (this.#closed) throw new WorkbenchError(503, "Assistant is closed.");
+  if (this.#busy.has(key)) throw new WorkbenchError(409, "This Pi session is busy.");
+  this.#busy.add(key);
+  const task = Promise.resolve().then(action);
+  this.#pending.add(task);
+  try { return await task; } catch (cause) {
+   if (cause instanceof WorkbenchError) throw cause;
+   throw error(cause instanceof ConversationRuntimeFailure && Object.hasOwn(ASSISTANT_WORKER_ERRORS, cause.message) ? cause.message as keyof typeof ASSISTANT_WORKER_ERRORS : "provider");
+  } finally { this.#busy.delete(key); this.#pending.delete(task); }
+ }
+
+ #key(input: ConversationDriverInput): string {
+  return `${resolve(input.sessionDir)}:${input.conversationId ?? input.sessionFile ?? "new"}`;
+ }
+
+ async #retained(input: ConversationDriverInput, key: string): Promise<RetainedSession> {
+  conversationRequest(input);
+  const fingerprint = JSON.stringify([input.system, input.mode, input.renameScope, input.chartScope]);
+  const prior = this.#sessions.get(key);
+  if (prior && prior.checkpoint === input.sessionFile && prior.fingerprint === fingerprint) return prior;
+  if (prior) { await prior.controlled.session.abort(); prior.controlled.session.dispose(); this.#sessions.delete(key); }
+  if (input.sessionFile) await controlledConversationSession(input.sessionFile, input.sessionDir);
+  // Construction can append SDK metadata. Start on a fork, never mutate the published snapshot.
+  const manager = input.sessionFile ? SessionManager.forkFrom(input.sessionFile, CONVERSATION_CWD, input.sessionDir) : SessionManager.create(CONVERSATION_CWD, input.sessionDir);
+  const controlled = await createConversationSession(this.#providers, input, manager);
+  const retained = {controlled, fingerprint, checkpoint: input.sessionFile};
+  this.#sessions.set(key, retained);
+  return retained;
+ }
+
+ #checkpoint(retained: RetainedSession): string {
+  const {session} = retained.controlled;
+  const path = session.sessionFile;
+  if (!path) throw error("provider");
+  // Pi intentionally keeps selection-only setup entries in memory. Export through
+  // its supported API so explicit selection survives restart before the first prompt.
+  session.exportToJsonl(path);
+  session.sessionManager.setSessionFile(path);
+  session.agent.sessionId = session.sessionManager.getSessionId();
+  session.refreshContext();
+  retained.checkpoint = path;
+  return path;
+ }
+
+ #fork(retained: RetainedSession, input: ConversationDriverInput): void {
+  const {session} = retained.controlled;
+  const current = session.sessionFile;
+  if (!current) throw error("provider");
+  // Export setup entries before forking; no user message has been submitted yet.
+  session.exportToJsonl(current);
+  const manager = SessionManager.forkFrom(current, CONVERSATION_CWD, input.sessionDir);
+  const next = manager.getSessionFile();
+  if (!next) throw error("provider");
+  session.sessionManager.setSessionFile(next);
+  session.agent.sessionId = session.sessionManager.getSessionId();
+  session.refreshContext();
+ }
+
+ async #select(controlled: ControlledConversationSession, selection: SessionModelSelection): Promise<void> {
+  const available = await this.#providers.runtime.getAvailable();
+  if (!available.some((model) => model.provider === selection.provider && model.id === selection.modelId)) throw error("model");
+  const model = this.#providers.runtime.getModel(selection.provider, selection.modelId);
+  if (!model) throw error("model");
+  await controlled.session.setModel(model, {persist: selection.persist});
+  controlled.session.setThinkingLevel(selection.thinkingLevel, {persist: selection.persist});
+  if (selection.persist) {
+   await this.#providers.settings.flush();
+   if (this.#providers.settings.drainErrors().length) throw new WorkbenchError(500, "Pi could not save the default model settings.");
+  }
+ }
+
+ modelState(input: ConversationDriverInput): Promise<ConversationModelResult> {
+  const key = this.#key(input);
+  return this.#operation(key, async () => {
+   const retained = await this.#retained(input, key);
+   return {modelState: retained.controlled.modelState(), sessionFile: this.#checkpoint(retained)};
+  });
+ }
+
+ selectModel(input: ConversationDriverInput, selection: SessionModelSelection): Promise<ConversationModelResult> {
+  const key = this.#key(input);
+  return this.#operation(key, async () => {
+   const retained = await this.#retained(input, key);
+   this.#fork(retained, input);
+   try {
+    await this.#select(retained.controlled, selection);
+    return {modelState: retained.controlled.modelState(), sessionFile: this.#checkpoint(retained)};
+   } catch (cause) { retained.checkpoint = null; retained.controlled.session.dispose(); this.#sessions.delete(key); throw cause; }
+  });
+ }
+
+ async #draftSession(): Promise<ControlledConversationSession> {
+  this.#draft ??= createConversationSession(this.#providers, {
+   provider: "", modelId: "", sessionDir: join(this.#providers.agentDir, "draft"), sessionFile: null,
+   system: `Select a model. No dataset has been shared.\nCurrent working directory: ${CONVERSATION_CWD}\n`, user: "Select a model.", mode: "plan",
+  }, SessionManager.inMemory(CONVERSATION_CWD), true).catch((cause) => { this.#draft = undefined; throw cause; });
+  return this.#draft;
+ }
+
+ draftModelState(): Promise<SessionModelState> {
+  return this.#operation("draft", async () => (await this.#draftSession()).modelState());
+ }
+
+ selectDraftModel(selection: SessionModelSelection): Promise<SessionModelState> {
+  return this.#operation("draft", async () => {
+   const controlled = await this.#draftSession();
+   await this.#select(controlled, selection);
+   return controlled.modelState();
+  });
+ }
+
+ chat(input: ConversationDriverInput, onEvent: Parameters<ConversationDriver["chat"]>[1], signal: AbortSignal): ReturnType<ConversationDriver["chat"]> {
+  const key = this.#key(input);
+  return this.#operation(key, async () => {
+   if (signal.aborted) throw error("cancelled");
+   const controller = new AbortController();
+   const combined = AbortSignal.any([signal, controller.signal]);
+   this.#stoppers.add(controller);
+   let timedOut = false;
+   const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, ASSISTANT_TIMEOUT_MS);
+   let retained: RetainedSession | undefined;
+   try {
+    retained = await this.#retained(input, key);
+    if (combined.aborted) throw error("cancelled");
+    this.#fork(retained, input);
+    const result = await retained.controlled.run(input, onEvent, combined);
+    if (combined.aborted) throw error("cancelled");
+    retained.checkpoint = result.sessionFile;
+    return result;
+   } catch (cause) {
+    // The caller remains the publication authority. A failed candidate is never
+    // reused, and a successful but rejected checkpoint is discarded on next input.
+    if (retained) { await retained.controlled.session.abort(); retained.controlled.session.dispose(); this.#sessions.delete(key); }
+    if (timedOut) throw error("timeout");
+    throw cause;
+   } finally { clearTimeout(timeout); this.#stoppers.delete(controller); }
+  });
+ }
+
+ async close(): Promise<void> {
+  this.#closed = true;
+  for (const controller of this.#stoppers) controller.abort();
+  await Promise.allSettled(this.#pending);
+  for (const {controlled} of this.#sessions.values()) { await controlled.session.abort(); controlled.session.dispose(); }
+  this.#sessions.clear();
+  const draft = await this.#draft?.catch(() => undefined);
+  if (draft) { await draft.session.abort(); draft.session.dispose(); }
+ }
 }

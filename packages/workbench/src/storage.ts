@@ -43,9 +43,12 @@ import type {
 	RenameProposal,
 	RenameProposalInput,
 } from "./conversation-contracts.ts";
+import { CONVERSATION_REASONING_EFFORTS } from "./conversation-contracts.ts";
+import { conversationContextHash } from "./conversation-screenshots.ts";
 import { MetadataStore, type TransformDraft } from "./metadata.ts";
 import { type DatasetProfile, PROFILER_VERSION, type ProfileInput } from "./profile-contracts.ts";
 import { isDatasetProfile } from "./profile-validation.ts";
+import type { SessionModelState } from "./provider-contracts.ts";
 import {
 	TRANSFORM_DRAFT_TTL_MS,
 	TRANSFORM_MAX_VERSIONS,
@@ -79,13 +82,39 @@ export class WorkbenchError extends Error {
 	}
 }
 
+function validModelIdentity(value: unknown): boolean {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const model = value as Record<string, unknown>;
+	return ["provider", "id", "name"].every((key) => typeof model[key] === "string" && model[key].length > 0 && model[key].length <= 512 && !/[\u0000-\u001f\u007f]/u.test(model[key]));
+}
+
+function validRoutedModel(value: SessionModelState["routedModel"]): boolean {
+	return value === null || (validModelIdentity(value) && Object.keys(value).every((key) => ["provider", "id", "name", "thinkingLevel"].includes(key)) &&
+		(value.thinkingLevel === undefined || CONVERSATION_REASONING_EFFORTS.includes(value.thinkingLevel)));
+}
+
+function validModelState(value: SessionModelState): boolean {
+	if (!value || typeof value !== "object" || Object.keys(value).length !== 3 ||
+		!CONVERSATION_REASONING_EFFORTS.includes(value.thinkingLevel) || !validRoutedModel(value.routedModel)) return false;
+	const model = value.model;
+	return model === null || (validModelIdentity(model) &&
+		Object.keys(model).length === 11 && Object.keys(model).every((key) => ["provider", "id", "name", "contextWindow", "maxTokens", "input", "reasoning", "thinkingLevels", "cost", "billing", "virtual"].includes(key)) &&
+		Number.isFinite(model.contextWindow) && model.contextWindow > 0 && Number.isFinite(model.maxTokens) && model.maxTokens > 0 &&
+		Array.isArray(model.input) && model.input.every((kind) => kind === "text" || kind === "image") && typeof model.reasoning === "boolean" &&
+		Array.isArray(model.thinkingLevels) && model.thinkingLevels.every((level) => CONVERSATION_REASONING_EFFORTS.includes(level)) &&
+		["subscription", "api", "virtual"].includes(model.billing) && typeof model.virtual === "boolean" &&
+		model.cost && Object.keys(model.cost).length === 4 && ["input", "output", "cacheRead", "cacheWrite"].every((key) =>
+			Number.isFinite(model.cost[key as keyof typeof model.cost]) && model.cost[key as keyof typeof model.cost] >= 0));
+}
+
 function validateConversationMessage(value: Conversation["messages"][number]): boolean {
 	return (
 		typeof value.id === "string" &&
 		typeof value.text === "string" &&
 		(value.role === "user" || value.role === "assistant") &&
 		(value.state === "complete" || value.state === "cancelled" || value.state === "failed") &&
-		Number.isFinite(Date.parse(value.createdAt))
+		Number.isFinite(Date.parse(value.createdAt)) &&
+		(value.model === undefined || (value.role === "assistant" && validRoutedModel(value.model)))
 	);
 }
 
@@ -1107,6 +1136,10 @@ export class WorkbenchStore {
 			conversation.title.length > 120 ||
 			(conversation.archivedAt !== null && !Number.isFinite(Date.parse(conversation.archivedAt))) ||
 			!["ready", "running", "failed"].includes(conversation.state) ||
+			(conversation.mode !== undefined && conversation.mode !== "plan" && conversation.mode !== "execute") ||
+			(conversation.reasoningEffort !== undefined &&
+				!CONVERSATION_REASONING_EFFORTS.includes(conversation.reasoningEffort)) ||
+			!validModelState(conversation.modelState) ||
 			!Array.isArray(conversation.messages) ||
 			conversation.messages.some(
 				(message) => !validateConversationMessage(message) || message.text.length > 16 * 1024,
@@ -1116,6 +1149,17 @@ export class WorkbenchStore {
 		const previous = this.#metadata!.conversation(conversation.projectId, conversation.datasetId, conversation.id);
 		if (previous && !isDeepStrictEqual(previous.scope, conversation.scope))
 			throw new WorkbenchError(409, "Conversation disclosure scope is immutable.");
+		if (
+			previous?.state === "running" &&
+			(previous.title !== conversation.title ||
+				previous.archivedAt !== conversation.archivedAt ||
+				(previous.mode ?? "execute") !== (conversation.mode ?? "execute") ||
+				(conversation.state !== "ready" && (previous.reasoningEffort ?? "off") !== (conversation.reasoningEffort ?? "off")))
+		)
+			throw new WorkbenchError(409, "Wait for the active conversation response before changing session settings.");
+		if (previous?.state === "running" && conversation.state !== "ready" &&
+			(previous.sessionFile !== conversation.sessionFile || !isDeepStrictEqual(previous.modelState, conversation.modelState)))
+			throw new WorkbenchError(409, "Only a successful response can publish a changed Pi session.");
 		if (
 			(conversation.state === "running" && previous?.state === "running") ||
 			[...this.#proposalOperations.values()].some((operation) => operation.conversationId === conversation.id)
@@ -1128,6 +1172,8 @@ export class WorkbenchStore {
 			...this.#metadata!.chartProposals(conversation.projectId, conversation.datasetId, conversation.id),
 		];
 		const count = proposals.length + chartInputs.length;
+		if (count && (conversation.mode === "plan" || conversation.archivedAt))
+			throw new WorkbenchError(409, "Plan and archived conversations cannot save mutation proposals.");
 		if ((conversation.state === "running" && retained.length >= 100) || retained.length + count > 100)
 			throw new WorkbenchError(409, "This conversation has reached its proposal audit limit. Start a new chat.");
 		if (count && (previous?.state !== "running" || conversation.state !== "ready"))
@@ -1213,7 +1259,7 @@ export class WorkbenchStore {
 			context.project.id !== dataset.projectId ||
 			context.dataset.id !== dataset.id ||
 			context.dataset.versionId !== scope.datasetVersionId ||
-			proposalHash(context) !== scope.contextHash ||
+			conversationContextHash(context, scope.screenshots) !== scope.contextHash ||
 			!version?.facts ||
 			version.facts.artifactSha256 !== context.dataset.artifactHash ||
 			context.schema.some(
@@ -1318,6 +1364,7 @@ export class WorkbenchStore {
 
 	#beginChartProposal(projectId: string, datasetId: string, conversationId: string, id: string): ChartProposal {
 		const { conversation } = this.#proposalContext(projectId, datasetId, conversationId);
+		if (conversation.archivedAt) throw new WorkbenchError(409, "Archived conversations are read-only.");
 		if (
 			conversation.state === "running" ||
 			[...this.#proposalOperations.values()].some((operation) => operation.conversationId === conversationId)
@@ -1448,6 +1495,11 @@ export class WorkbenchStore {
 		)
 			throw new WorkbenchError(400, "Provide only the exact preview identifier and explicit approval.");
 		validateId(value.previewId);
+		if (this.#proposalContext(projectId, datasetId, conversationId).conversation.mode === "plan")
+			throw new WorkbenchError(
+				409,
+				"Plan mode cannot save charts. Switch to Execute and explicitly approve the preview.",
+			);
 		const proposal = this.#beginChartProposal(projectId, datasetId, conversationId, id);
 		const reviewed = proposal.state === "previewed" && proposal.preview?.id === value.previewId;
 		let work: ActiveTransform | undefined;
@@ -1539,7 +1591,7 @@ export class WorkbenchStore {
 			context.project.id !== dataset.projectId ||
 			context.dataset.id !== dataset.id ||
 			context.dataset.versionId !== scope.datasetVersionId ||
-			createHash("sha256").update(JSON.stringify(context)).digest("hex") !== scope.contextHash ||
+			conversationContextHash(context, scope.screenshots) !== scope.contextHash ||
 			!version?.facts ||
 			version.facts.artifactSha256 !== context.dataset.artifactHash
 		)
@@ -1688,6 +1740,7 @@ export class WorkbenchStore {
 
 	#beginProposal(projectId: string, datasetId: string, conversationId: string, id: string): RenameProposal {
 		const { conversation } = this.#proposalContext(projectId, datasetId, conversationId);
+		if (conversation.archivedAt) throw new WorkbenchError(409, "Archived conversations are read-only.");
 		if (
 			conversation.state === "running" ||
 			[...this.#proposalOperations.values()].some((operation) => operation.conversationId === conversationId)
@@ -1809,6 +1862,11 @@ export class WorkbenchStore {
 		)
 			throw new WorkbenchError(400, "Provide only the exact preview identifier and explicit approval.");
 		validateId(value.previewId);
+		if (this.#proposalContext(projectId, datasetId, conversationId).conversation.mode === "plan")
+			throw new WorkbenchError(
+				409,
+				"Plan mode cannot apply changes. Switch to Execute and explicitly approve the preview.",
+			);
 		const proposal = this.#beginProposal(projectId, datasetId, conversationId, id);
 		const reviewed = proposal.state === "previewed" && proposal.preview?.id === value.previewId;
 		try {

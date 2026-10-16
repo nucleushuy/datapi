@@ -20,7 +20,7 @@ function launch(path: string, args: string[] = []): ChildProcessByStdio<Writable
 		PI_OFFLINE: "1",
 		PI_TELEMETRY: "0",
 		TSX_DISABLE_CACHE: "1",
-		TSX_TSCONFIG_PATH: join(root, "tsconfig.json"),
+		TSX_TSCONFIG_PATH: fileURLToPath(new URL("../tsconfig.runtime.json", import.meta.url)),
 	};
 	for (const name of ["SystemRoot", "TEMP", "TMP"]) if (process.env[name] !== undefined) env[name] = process.env[name];
 	return spawn(process.execPath, ["--import", import.meta.resolve("tsx"), "--max-old-space-size=256", path, ...args], {

@@ -13,10 +13,10 @@ import type {
 	Conversation,
 	ConversationChartPreview,
 	ConversationChartSaved,
-	ConversationDriver,
 } from "../src/conversation-contracts.ts";
 import { startWorkbench, type WorkbenchApplication } from "../src/server.ts";
 import { WorkbenchStore } from "../src/storage.ts";
+import { createFauxConversationDriver } from "./fixtures/conversation-faux-driver.ts";
 
 test(
 	"chart HTTP preview and explicit save retain scoped evidence and decisions across restart",
@@ -58,46 +58,16 @@ test(
 		const original = await seed.getDataset(project.id, imported.datasetId);
 		await settled((await seed.profile(project.id, original.id)).id);
 		await seed.close();
-		const driver: ConversationDriver & { authorizedProviders(): Promise<readonly string[]> } = {
-			async chat(input, onEvent) {
-				assert.equal(input.chartScope?.dataset.versionId, original.currentVersionId);
-				assert.deepEqual(
-					input.chartScope?.schema.map((column) => column.index),
-					[0, 1],
-				);
-				assert.doesNotMatch(input.user, /secret-one|secret-two|secret-three/);
-				onEvent({
-					type: "chart_proposal",
-					toolCallId: randomUUID(),
-					title: "Counts by group",
-					explanation:
-						"Compare observed categories; counts will be computed locally, not inferred from profile statistics.",
-					confidence: 0.8,
-					evidenceRefs: ["column.0.distinctCount"],
-					affectedColumns: [0],
-					spec: { ...defaultChartSpec(original.currentVersionId), x: 0 },
-				});
-				onEvent({ type: "text", delta: "Review this chart locally before saving." });
-				return {
-					text: "Review this chart locally before saving.",
-					sessionFile: join(root, "fixture.jsonl"),
-					usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 },
-				};
-			},
-			async authorizedProviders() {
-				return ["openai"];
-			},
-			async setCredential() {},
-			async deleteCredential() {},
-			async close() {},
-		};
-		const catalog = {
-			async models() {
-				return { models: [], guidance: "No network" };
-			},
-			async close() {},
-		};
-		app = await startWorkbench({ dataDir: root, port: 0, conversationDriver: driver, modelCatalog: catalog });
+		async function startApplication() {
+			const pi = await createFauxConversationDriver(root, { chart: {
+				title: "Counts by group",
+				explanation: "Compare observed categories; counts will be computed locally, not inferred from profile statistics.",
+				evidenceRefs: ["column.0.distinctCount"], affectedColumns: [0],
+				spec: { ...defaultChartSpec(original.currentVersionId), x: 0 },
+			} });
+			return startWorkbench({ dataDir: root, port: 0, conversationDriver: pi.driver, providers: pi.providers });
+		}
+		app = await startApplication();
 		let token = ((await (await fetch(`${app.url}/api/bootstrap`)).json()) as Bootstrap).token;
 		const base = `/api/projects/${project.id}/datasets/${original.id}`;
 		async function request(path: string, method = "GET", body?: unknown): Promise<Response> {
@@ -166,7 +136,7 @@ test(
 		const reviewed = (await reviewedResponse.json()) as ConversationChartPreview;
 		assert.ok(reviewed.proposal.preview);
 		await app.close();
-		app = await startWorkbench({ dataDir: root, port: 0, conversationDriver: driver, modelCatalog: catalog });
+		app = await startApplication();
 		token = ((await (await fetch(`${app.url}/api/bootstrap`)).json()) as Bootstrap).token;
 		const savedResponse = await request(`${nextRoute}/save`, "POST", {
 			previewId: reviewed.proposal.preview.id,
@@ -185,7 +155,7 @@ test(
 				.status >= 400,
 		);
 		await app.close();
-		app = await startWorkbench({ dataDir: root, port: 0, conversationDriver: driver, modelCatalog: catalog });
+		app = await startApplication();
 		token = ((await (await fetch(`${app.url}/api/bootstrap`)).json()) as Bootstrap).token;
 		const persisted = (await (await request(`${chat}/chart-proposals`)).json()) as ChartProposal[];
 		assert.equal(persisted.find((item) => item.id === proposal.id)?.state, "rejected");

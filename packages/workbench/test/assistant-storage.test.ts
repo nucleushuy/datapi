@@ -14,6 +14,7 @@ import type { ConversationDriver } from "../src/conversation-contracts.ts";
 import { ConversationService } from "../src/conversation-service.ts";
 import { MetadataStore } from "../src/metadata.ts";
 import { WorkbenchError, WorkbenchStore } from "../src/storage.ts";
+import { createFauxConversationDriver } from "./fixtures/conversation-faux-driver.ts";
 
 const SOURCE = "category,value\na,1\na,3\nb,5\n";
 
@@ -378,20 +379,21 @@ test("Pi conversations persist a frozen scope and relay streamed deltas", { time
 		operation: { kind: "filter", column: 0, operator: "eq", comparison: "text", value: "a" },
 	});
 	const inputs: Parameters<ConversationDriver["chat"]>[0][] = [];
+	let pi = await createFauxConversationDriver(state.root);
+	context.after(async () => { await pi.driver.close(); await pi.providers.close(); });
 	const driver: ConversationDriver = {
-		async chat(input, onEvent) {
+		...pi.driver,
+		async chat(input, onEvent, signal) {
 			inputs.push(structuredClone(input));
+			const actual = await pi.driver.chat(input, () => {}, signal);
 			onEvent({ type: "text", delta: "Pi " });
 			onEvent({ type: "text", delta: "streams." });
 			return {
-				sessionFile: input.sessionFile ?? "session.jsonl",
+				...actual,
 				text: "Pi streams.",
 				usage: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 3 },
 			};
 		},
-		async setCredential() {},
-		async deleteCredential() {},
-		async close() {},
 	};
 	const service = new ConversationService(state.store, driver);
 	context.after(() => service.close());
@@ -403,8 +405,8 @@ test("Pi conversations persist a frozen scope and relay streamed deltas", { time
 		selectedColumns: [0, 1],
 		filters: [],
 		request: "Compare the values",
-		provider: "test-provider",
-		modelId: "test-model",
+		provider: "openai",
+		modelId: "fixture",
 		attachments,
 		executionIds: [preview.id],
 	});
@@ -428,8 +430,8 @@ test("Pi conversations persist a frozen scope and relay streamed deltas", { time
 			selectedColumns: [0],
 			filters: [],
 			request: "Inspect",
-			provider: "test-provider",
-			modelId: "test-model",
+			provider: "openai",
+			modelId: "fixture",
 			executionIds: [randomUUID()],
 		}),
 		status(404),
@@ -450,15 +452,17 @@ test("Pi conversations persist a frozen scope and relay streamed deltas", { time
 	);
 	assert.deepEqual(events, ["Pi ", "streams."]);
 	assert.equal(completed.messages.at(-1)?.text, "Pi streams.");
-	assert.equal(completed.sessionFile, "session.jsonl");
+	assert.ok(completed.sessionFile);
 	assert.equal(JSON.stringify(JSON.parse(inputs[0].user).context), originalContext);
 	assert.equal(inputs[0].user.includes("MUTATED_AFTER_CREATE"), false);
 	await state.store.discardTransform(project.id, dataset.id, preview.id);
 	await service.close();
+	await pi.providers.close();
 	await state.store.close();
 	state.store = new WorkbenchStore(state.root);
 	await state.store.init();
-	const reopened = new ConversationService(state.store, driver);
+	pi = await createFauxConversationDriver(state.root);
+	const reopened = new ConversationService(state.store, { ...pi.driver, chat: driver.chat });
 	context.after(() => reopened.close());
 	const restored = await reopened.get(project.id, dataset.id, conversation.id);
 	assert.equal(JSON.stringify(restored.scope.context), originalContext);
@@ -467,7 +471,7 @@ test("Pi conversations persist a frozen scope and relay streamed deltas", { time
 		message: "Continue without changing scope",
 	});
 	assert.equal(inputs[1].user, "Continue without changing scope");
-	assert.equal(inputs[1].sessionFile, "session.jsonl");
+	assert.equal(inputs[1].sessionFile, completed.sessionFile);
 	assert.equal(inputs[1].system, inputs[0].system);
 	assert.equal(JSON.stringify(continued.scope.context), originalContext);
 	assert.equal(continued.scope.contextHash, originalHash);
@@ -501,16 +505,16 @@ test(
 		const streaming = new Promise<void>((resolve) => {
 			started = resolve;
 		});
+		const pi = await createFauxConversationDriver(state.root);
+		context.after(async () => { await pi.driver.close(); await pi.providers.close(); });
 		const driver: ConversationDriver = {
+			...pi.driver,
 			async chat(_input, _onEvent, signal) {
 				started();
 				return await new Promise((_, reject) => {
 					signal.addEventListener("abort", () => reject(new Error("cancelled")), { once: true });
 				});
 			},
-			async setCredential() {},
-			async deleteCredential() {},
-			async close() {},
 		};
 		const service = new ConversationService(state.store, driver);
 		context.after(() => service.close());
@@ -519,8 +523,8 @@ test(
 			selectedColumns: [0, 1],
 			filters: [],
 			request: "Compare the values",
-			provider: "test-provider",
-			modelId: "test-model",
+			provider: "openai",
+			modelId: "fixture",
 		});
 		const pending = service.send(project.id, dataset.id, conversation.id, { message: "Start streaming" });
 		await streaming;
@@ -541,14 +545,14 @@ test(
 		const profile = await state.store.getProfile(project.id, dataset.id);
 		assert.ok(profile);
 		let driverCalls = 0;
+		const pi = await createFauxConversationDriver(state.root);
+		context.after(async () => { await pi.driver.close(); await pi.providers.close(); });
 		const driver: ConversationDriver = {
+			...pi.driver,
 			async chat() {
 				driverCalls++;
 				throw new Error("Oversized payload reached the driver");
 			},
-			async setCredential() {},
-			async deleteCredential() {},
-			async close() {},
 		};
 		const service = new ConversationService(state.store, driver);
 		context.after(() => service.close());
@@ -557,8 +561,8 @@ test(
 			selectedColumns: [0, 1],
 			filters: [],
 			request: "Inspect",
-			provider: "test-provider",
-			modelId: "test-model",
+			provider: "openai",
+			modelId: "fixture",
 		};
 		const conversation = await service.create(project.id, dataset.id, selection);
 		const base = prepareAssistantContext(project, dataset, profile, [], selection);

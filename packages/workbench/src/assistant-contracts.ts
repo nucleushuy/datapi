@@ -18,17 +18,6 @@ export const SUGGESTION_CATEGORIES = [
 	"interpretation",
 ] as const;
 export const SUGGESTION_STATUSES = ["proposed", "accepted", "rejected", "applied", "failed", "reverted"] as const;
-export interface AssistantModel {
-	provider: string;
-	id: string;
-	name: string;
-	configured: boolean;
-	contextWindow: number;
-}
-export interface AssistantModels {
-	models: AssistantModel[];
-	guidance: string;
-}
 export interface AssistantAttachmentInput {
 	name: string;
 	mediaType: string;
@@ -161,17 +150,6 @@ export interface AssistantRun {
 	latencyMs: number;
 	receivedCharacters: number;
 	error: string | null;
-}
-export type AssistantProgress =
-	| { type: "progress"; receivedCharacters: number }
-	| { type: "usage"; usage: AssistantUsage };
-export interface AssistantDriver {
-	models(signal?: AbortSignal): Promise<AssistantModels>;
-	generate(
-		input: { provider: string; modelId: string; payload: AssistantPayload },
-		onProgress: (progress: AssistantProgress) => void,
-		signal: AbortSignal,
-	): Promise<{ text: string; usage: AssistantUsage }>;
 }
 export interface AssistantChartPreview {
 	previewId: string;

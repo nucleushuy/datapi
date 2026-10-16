@@ -11,6 +11,7 @@ import type { Conversation, RenameProposal, RenameProposalInput } from "../src/c
 import { ConversationService } from "../src/conversation-service.ts";
 import { MetadataStore } from "../src/metadata.ts";
 import { WorkbenchError, WorkbenchStore } from "../src/storage.ts";
+import { createFauxConversationDriver } from "./fixtures/conversation-faux-driver.ts";
 
 function status(code: number): (error: unknown) => boolean {
 	return (error) => error instanceof WorkbenchError && error.status === code;
@@ -72,12 +73,13 @@ async function fixture(context: TestContext) {
 		archivedAt: null,
 		state: "ready",
 		sessionFile: null,
+		modelState: { model: null, thinkingLevel: "off", routedModel: null },
 		scope: {
 			version: 1,
 			projectId: project.id,
 			datasetId: dataset.id,
 			datasetVersionId: dataset.currentVersionId,
-			provider: "fixture",
+			provider: "openai",
 			modelId: "fixture",
 			context: disclosure,
 			contextHash: createHash("sha256").update(JSON.stringify(disclosure)).digest("hex"),
@@ -167,6 +169,20 @@ test(
 		assert.deepEqual(await state.store.getDataset(projectId, dataset.id), dataset);
 		const third = await propose(state.store, conversation);
 		const ready = await state.store.previewRenameProposal(projectId, dataset.id, conversation.id, third.id);
+		const planning = await state.store.conversation(projectId, dataset.id, conversation.id);
+		planning.mode = "plan";
+		await state.store.putConversation(planning);
+		await assert.rejects(
+			state.store.applyRenameProposal(projectId, dataset.id, conversation.id, third.id, approval(ready)),
+			/Plan mode cannot apply/,
+		);
+		assert.equal(
+			(await state.store.renameProposal(projectId, dataset.id, conversation.id, third.id)).state,
+			"previewed",
+		);
+		assert.deepEqual(await state.store.getDataset(projectId, dataset.id), dataset);
+		planning.mode = "execute";
+		await state.store.putConversation(planning);
 		for (const body of [
 			{ previewId: ready.preview!.id },
 			{ ...approval(ready), approved: false },
@@ -518,7 +534,10 @@ test(
 	async (context) => {
 		const { state, projectId, dataset, conversation } = await fixture(context);
 		let fail = true;
+		const pi = await createFauxConversationDriver(state.root);
+		context.after(async () => { await pi.driver.close(); await pi.providers.close(); });
 		const service = new ConversationService(state.store, {
+			...pi.driver,
 			async chat(input, onEvent) {
 				assert.deepEqual(input.renameScope, {
 					datasetVersionId: dataset.currentVersionId,
@@ -540,14 +559,12 @@ test(
 					name: "secret",
 				});
 				return {
+					modelState: conversation.modelState,
 					sessionFile: "uncommitted-session.jsonl",
 					text: "uncommitted answer",
 					usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 },
 				};
 			},
-			async setCredential() {},
-			async deleteCredential() {},
-			async close() {},
 		});
 		context.after(() => service.close());
 		for (let turn = 0; turn < 2; turn++) {

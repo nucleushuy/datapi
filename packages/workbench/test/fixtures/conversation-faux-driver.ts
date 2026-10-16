@@ -7,6 +7,7 @@ import {
 	fauxProvider,
 	fauxToolCall,
 	InMemoryCredentialStore,
+	type JsonValue,
 } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { AssistantContext, AssistantDriver, AssistantModels } from "../../src/assistant-contracts.ts";
@@ -41,7 +42,9 @@ export function snapshotConversationContext(context: Context): Context {
 }
 
 /** Test-only native provider. No URL, API credential resolver, or network transport is installed. */
-export async function createFauxConversationRuntime(options: { tokensPerSecond?: number } = {}) {
+export async function createFauxConversationRuntime(
+	options: { tokensPerSecond?: number; reasoning?: boolean; images?: boolean } = {},
+) {
 	const runtime = await ModelRuntime.create({
 		credentials: new InMemoryCredentialStore(),
 		modelsPath: null,
@@ -51,7 +54,16 @@ export async function createFauxConversationRuntime(options: { tokensPerSecond?:
 	const faux = fauxProvider({
 		provider: "openai",
 		api: "openai-responses",
-		models: [{ id: "fixture", name: "Fixture", maxTokens: 20000, contextWindow: 128000 }],
+		models: [
+			{
+				id: "fixture",
+				name: "Fixture",
+				maxTokens: 20000,
+				contextWindow: 128000,
+				reasoning: options.reasoning,
+				input: options.images === false ? ["text"] : ["text", "image"],
+			},
+		],
 		tokenSize: { min: 16, max: 16 },
 		tokensPerSecond: options.tokensPerSecond,
 	});
@@ -70,10 +82,7 @@ export type FauxConversationChart =
 			affectedColumns?: number[];
 	  };
 
-export function fauxConversationChart(
-	scope: AssistantContext,
-	option: FauxConversationChart = "auto",
-): Omit<ChartProposalInput, "toolCallId"> {
+export function fauxConversationChart(scope: AssistantContext, option: FauxConversationChart = "auto") {
 	const column =
 		scope.schema.find((column) => column.basicType === "number") ??
 		scope.schema.find((column) => column.basicType !== "binary" && column.basicType !== "nested");
@@ -84,9 +93,9 @@ export function fauxConversationChart(
 					...defaultChartSpec(scope.dataset.versionId),
 					type: column!.basicType === "number" ? "histogram" : "bar",
 					x: column!.index,
-					filters: structuredClone(scope.filters),
+					filters: scope.filters,
 				}
-			: structuredClone(option.spec);
+			: option.spec;
 	const affectedColumns =
 		option !== "auto" && option.affectedColumns
 			? [...option.affectedColumns]
@@ -103,8 +112,8 @@ export function fauxConversationChart(
 		confidence: 0.8,
 		evidenceRefs: option === "auto" ? (evidence ? [evidence.id] : []) : [...(option.evidenceRefs ?? [])],
 		affectedColumns,
-		spec,
-	};
+		spec: { ...spec, filters: spec.filters.map((filter) => ({ ...filter })) },
+	} satisfies Omit<ChartProposalInput, "toolCallId"> & Record<string, JsonValue>;
 }
 
 export function fauxConversationChartScope(): AssistantContext {

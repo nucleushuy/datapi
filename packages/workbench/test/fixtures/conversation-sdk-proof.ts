@@ -105,6 +105,57 @@ try {
 	assert.deepEqual(resumed.messages[1].content, [{ type: "text", text: answer }]);
 	assert.deepEqual(resumed.messages[2].content, [{ type: "text", text: "Continue using the frozen context." }]);
 
+	const configured = await createFauxConversationRuntime({ reasoning: true });
+	let receivedReasoning: unknown;
+	configured.faux.setResponses([
+		(context, options) => {
+			receivedReasoning = options?.reasoning;
+			assert.deepEqual(context.tools ?? [], []);
+			return fauxAssistantMessage("A read-only plan with explicit reasoning.");
+		},
+	]);
+	await runConversationSession(
+		{
+			...input,
+			mode: "plan",
+			reasoningEffort: "high",
+			renameScope: { datasetVersionId: "v1", columns: [{ index: 0, name: "group" }] },
+			chartScope: fauxConversationChartScope(),
+		},
+		() => {},
+		undefined,
+		configured.runtime,
+	);
+	assert.equal(receivedReasoning, "high", "Requested reasoning reaches the actual provider adapter");
+	const screenshot = {
+		type: "image" as const,
+		mimeType: "image/png",
+		data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+	};
+	configured.faux.setResponses([
+		(context) => {
+			const content = context.messages.at(-1)?.content;
+			assert.ok(Array.isArray(content));
+			assert.deepEqual(
+				content.filter((part) => part.type === "image"),
+				[screenshot],
+			);
+			assert.equal(context.systemPrompt?.includes(screenshot.data), false);
+			assert.equal(JSON.stringify(content.filter((part) => part.type === "text")).includes(screenshot.data), false);
+			return fauxAssistantMessage("The explicitly shared screenshot is available.");
+		},
+	]);
+	await runConversationSession({ ...input, images: [screenshot] }, () => {}, undefined, configured.runtime);
+	const textOnly = await createFauxConversationRuntime({ images: false });
+	await assert.rejects(
+		runConversationSession({ ...input, images: [screenshot] }, () => {}, undefined, textOnly.runtime),
+		{ message: "images" },
+	);
+	await assert.rejects(
+		runConversationSession({ ...input, reasoningEffort: "high" }, () => {}, undefined, textOnly.runtime),
+		{ message: "reasoning" },
+	);
+	assert.equal(textOnly.faux.state.callCount, 0);
 	const renameInput = {
 		...input,
 		renameScope: {

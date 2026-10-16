@@ -7,7 +7,7 @@ test("HTTP Pi streaming, disclosure budgets and restart proof", { timeout: 200_0
 	const env: NodeJS.ProcessEnv = {
 		PI_OFFLINE: "1",
 		PI_TELEMETRY: "0",
-		TSX_TSCONFIG_PATH: fileURLToPath(new URL("../../../tsconfig.json", import.meta.url)),
+		TSX_TSCONFIG_PATH: fileURLToPath(new URL("../tsconfig.runtime.json", import.meta.url)),
 	};
 	for (const name of ["SystemRoot", "TEMP", "TMP"]) if (process.env[name] !== undefined) env[name] = process.env[name];
 	const child = spawn(
