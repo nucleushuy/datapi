@@ -126,7 +126,7 @@ describe("Fireworks models", () => {
 
 	// Regression for #9323: native effort must reach Messages without budget-based fallback.
 	it.each([
-		["accounts/fireworks/models/deepseek-v4-flash-0731", ["off", "low", "high", "max"]],
+		["accounts/fireworks/models/deepseek-v4p1-flash", ["off", "low", "high", "max"]],
 		["accounts/fireworks/models/deepseek-v4-flash-vision-exp", ["off", "low", "high", "max"]],
 		["accounts/fireworks/models/deepseek-v4-pro-0813", ["off", "low", "high", "max"]],
 		["accounts/fireworks/models/qwen3p8-max", ["off", "low", "medium", "xhigh"]],
