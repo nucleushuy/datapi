@@ -1,5 +1,10 @@
-import { getSupportedThinkingLevels, type Api, type Model } from "@earendil-works/pi-ai";
-import { estimateTokens, type ModelRoute, type ModelRouteRequest, type ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { type Api, getSupportedThinkingLevels, type Model } from "@earendil-works/pi-ai";
+import {
+	estimateTokens,
+	type ModelRoute,
+	type ModelRouteRequest,
+	type ModelRuntime,
+} from "@earendil-works/pi-coding-agent";
 
 /** The only application-defined catalog entry; every destination comes from Pi availability. */
 export function registerAutoModel(runtime: ModelRuntime): void {
@@ -22,8 +27,8 @@ async function routeAutoModel(runtime: ModelRuntime, request: ModelRouteRequest)
 		throw new Error("Auto could not read available models. Check provider connections and try again.");
 	}
 	signal.throwIfAborted();
-	const images = request.messages.some((message) =>
-		Array.isArray(message.content) && message.content.some((block) => block.type === "image"),
+	const images = request.messages.some(
+		(message) => Array.isArray(message.content) && message.content.some((block) => block.type === "image"),
 	);
 	// Pi's estimator includes system sections, tool declarations, tool arguments and images.
 	const inputTokens = request.messages.reduce((total, message) => total + estimateTokens(message) + 16, 0);
@@ -35,10 +40,18 @@ async function routeAutoModel(runtime: ModelRuntime, request: ModelRouteRequest)
 		return outputReserve > 0 && model.contextWindow >= inputTokens + outputReserve;
 	});
 	if (!candidates.length) {
-		throw new Error("No available model supports this request's images, context size and thinking level. Connect a compatible provider or change the model.");
+		throw new Error(
+			"No available model supports this request's images, context size and thinking level. Connect a compatible provider or change the model.",
+		);
 	}
-	const preferred = request.reason === "continuation" ? request.previous?.model : request.reason === "retry" ? request.failed?.model : undefined;
-	const prior = preferred && candidates.find((model) => model.provider === preferred.provider && model.id === preferred.id);
+	const preferred =
+		request.reason === "continuation"
+			? request.previous?.model
+			: request.reason === "retry"
+				? request.failed?.model
+				: undefined;
+	const prior =
+		preferred && candidates.find((model) => model.provider === preferred.provider && model.id === preferred.id);
 	if (prior) return { model: prior, thinkingLevel: request.thinkingLevel };
 	// No classifier call or provider-specific ranking: choose the least estimated catalog cost.
 	const cost = (model: Model<Api>) => {
@@ -50,7 +63,11 @@ async function routeAutoModel(runtime: ModelRuntime, request: ModelRouteRequest)
 	for (let index = 1; index < candidates.length; index++) {
 		const candidate = candidates[index]!;
 		const candidateCost = cost(candidate);
-		if (candidateCost < selectedCost || (candidateCost === selectedCost && `${candidate.provider}/${candidate.id}` < `${selected.provider}/${selected.id}`)) {
+		if (
+			candidateCost < selectedCost ||
+			(candidateCost === selectedCost &&
+				`${candidate.provider}/${candidate.id}` < `${selected.provider}/${selected.id}`)
+		) {
 			selected = candidate;
 			selectedCost = candidateCost;
 		}

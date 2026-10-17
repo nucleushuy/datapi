@@ -1,43 +1,45 @@
 import { randomUUID } from "node:crypto";
-import { join } from "node:path";
 import {
 	type Context,
 	type FauxProviderHandle,
 	fauxAssistantMessage,
 	fauxProvider,
 	fauxToolCall,
+	getCurrentSystemPrompt,
+	getCurrentTools,
 	InMemoryCredentialStore,
 	type JsonValue,
 } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import type { AssistantContext, AssistantDriver, AssistantModels } from "../../src/assistant-contracts.ts";
-import { ASSISTANT_WORKER_ERRORS } from "../../src/assistant-driver.ts";
+import type { AssistantContext } from "../../src/assistant-contracts.ts";
 import type { ChartSpec } from "../../src/chart-contracts.ts";
 import { defaultChartSpec } from "../../src/chart-spec.ts";
 import { chartColumns } from "../../src/chart-validation.ts";
 import type { ChartProposalInput, ConversationDriver } from "../../src/conversation-contracts.ts";
 import { PiConversationDriver } from "../../src/conversation-driver.ts";
-import { runConversationSession } from "../../src/conversation-sdk-worker.ts";
+import { ProviderService } from "../../src/provider-service.ts";
 import { WorkbenchError } from "../../src/storage.ts";
 
 export const FAUX_CONVERSATION_MODEL = {
 	provider: "openai",
 	id: "fixture",
 	name: "Deterministic Pi fixture",
-	configured: true,
 	contextWindow: 128000,
 };
 
 export function snapshotConversationContext(context: Context): Context {
 	// SDK agent tools carry execute callbacks; a provider observes their public definitions only.
 	return structuredClone({
-		...context,
-		tools: context.tools?.map(({ name, description, parameters, constrainedSampling }) => ({
-			name,
-			description,
-			parameters,
-			constrainedSampling,
-		})),
+		systemPrompt: context.systemPrompt ?? getCurrentSystemPrompt(context.messages),
+		messages: context.messages.filter((message) => message.role !== "system"),
+		tools: (context.tools ?? getCurrentTools(context.messages)).map(
+			({ name, description, parameters, constrainedSampling }) => ({
+				name,
+				description,
+				parameters,
+				constrainedSampling,
+			}),
+		),
 	});
 }
 
@@ -58,6 +60,14 @@ export async function createFauxConversationRuntime(
 			{
 				id: "fixture",
 				name: "Fixture",
+				maxTokens: 20000,
+				contextWindow: 128000,
+				reasoning: options.reasoning,
+				input: options.images === false ? ["text"] : ["text", "image"],
+			},
+			{
+				id: "fixture-second",
+				name: "Second fixture",
 				maxTokens: 20000,
 				contextWindow: 128000,
 				reasoning: options.reasoning,
@@ -155,20 +165,24 @@ export async function createFauxConversationDriver(
 	dataDir: string,
 	options: {
 		tokensPerSecond?: number;
+		reasoning?: boolean;
+		images?: boolean;
 		beforeResult?: () => Promise<void>;
 		rename?: { column: number; name: string; datasetVersionId?: string };
 		chart?: FauxConversationChart;
 	} = {},
 ): Promise<FauxConversationFixture> {
 	const { runtime, faux } = await createFauxConversationRuntime(options);
-	const credentials = new PiConversationDriver(dataDir);
+	const providers = await ProviderService.create(dataDir, { runtime });
+	const production = new PiConversationDriver(providers);
 	const seen: Context[] = [];
 	const active = new Set<AbortController>();
 	let closed = false;
-	const driver: ConversationDriver & Pick<PiConversationDriver, "authorizedProviders"> = {
-		setCredential: (provider, key) => credentials.setCredential(provider, key),
-		deleteCredential: (provider) => credentials.deleteCredential(provider),
-		authorizedProviders: () => credentials.authorizedProviders(),
+	const driver: ConversationDriver = {
+		modelState: (input) => production.modelState(input),
+		selectModel: (input, selection) => production.selectModel(input, selection),
+		draftModelState: () => production.draftModelState(),
+		selectDraftModel: (selection) => production.selectDraftModel(selection),
 		async chat(input, onEvent, signal) {
 			if (closed) throw new WorkbenchError(503, "Assistant is closed.");
 			const controller = new AbortController();
@@ -226,24 +240,10 @@ export async function createFauxConversationDriver(
 						},
 					]);
 				}
-				const result = await runConversationSession(
-					{ ...input, authPath: join(dataDir, "pi", "auth.json") },
-					onEvent,
-					combined,
-					runtime,
-				);
+				const result = await production.chat(input, onEvent, combined);
 				await options.beforeResult?.();
-				if (combined.aborted) throw new Error("cancelled");
+				if (combined.aborted) throw new WorkbenchError(499, "Assistant request was cancelled.");
 				return result;
-			} catch (cause) {
-				const code =
-					cause instanceof Error && Object.hasOwn(ASSISTANT_WORKER_ERRORS, cause.message)
-						? (cause.message as keyof typeof ASSISTANT_WORKER_ERRORS)
-						: "provider";
-				throw new WorkbenchError(
-					code === "cancelled" ? 499 : code === "credentials" ? 409 : 502,
-					ASSISTANT_WORKER_ERRORS[code],
-				);
 			} finally {
 				active.delete(controller);
 			}
@@ -251,25 +251,15 @@ export async function createFauxConversationDriver(
 		async close() {
 			closed = true;
 			for (const controller of active) controller.abort();
-			await credentials.close();
+			await production.close();
 		},
 	};
-	const catalogResult: AssistantModels = {
-		models: [FAUX_CONVERSATION_MODEL],
-		guidance: "Deterministic local SDK provider; no hosted API calls.",
-	};
-	const catalog: Pick<AssistantDriver, "models"> & { close(): Promise<void> } = {
-		async models() {
-			return structuredClone(catalogResult);
-		},
-		async close() {},
-	};
-	return { driver, catalog, seen, faux };
+	return { driver, providers, seen, faux };
 }
 
 export interface FauxConversationFixture {
-	driver: ConversationDriver & Pick<PiConversationDriver, "authorizedProviders">;
-	catalog: Pick<AssistantDriver, "models"> & { close(): Promise<void> };
+	driver: ConversationDriver;
+	providers: ProviderService;
 	seen: Context[];
 	faux: FauxProviderHandle;
 }

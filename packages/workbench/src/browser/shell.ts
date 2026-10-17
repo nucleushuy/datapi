@@ -49,10 +49,10 @@ export const DEFAULT_APP_KEYBINDINGS: AppKeybindings = {
 export function matchesAppKeybinding(event: KeyboardEvent, binding: AppKeybinding): boolean {
 	return (
 		event.key.toLowerCase() === binding.key.toLowerCase() &&
-		event.ctrlKey === Boolean(binding.ctrl) &&
-		event.metaKey === Boolean(binding.meta) &&
-		event.altKey === Boolean(binding.alt) &&
-		event.shiftKey === Boolean(binding.shift)
+		Boolean(event.ctrlKey) === Boolean(binding.ctrl) &&
+		Boolean(event.metaKey) === Boolean(binding.meta) &&
+		Boolean(event.altKey) === Boolean(binding.alt) &&
+		Boolean(event.shiftKey) === Boolean(binding.shift)
 	);
 }
 
@@ -757,7 +757,7 @@ export function initializeShell(document: Document, window: Window, options: She
 	listen<KeyboardEvent>(document, "keydown", (event) => {
 		if (event.defaultPrevented || event.isComposing || event.repeat) return;
 		const target = event.target as HTMLElement | null;
-		if (target?.closest('[aria-modal="true"]')) return;
+		if (typeof target?.closest === "function" && target.closest('[aria-modal="true"]')) return;
 		if (keybindings.commandPalette.some((binding) => matchesAppKeybinding(event, binding))) {
 			event.preventDefault();
 			if (dialog.open) closePalette();

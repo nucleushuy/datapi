@@ -6,8 +6,8 @@ import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import type { Bootstrap, ImportJob } from "../../src/contracts.ts";
 import type { Conversation, ConversationEvent } from "../../src/conversation-contracts.ts";
-import type { SessionModelState } from "../../src/provider-contracts.ts";
 import { MetadataStore } from "../../src/metadata.ts";
+import type { SessionModelState } from "../../src/provider-contracts.ts";
 import { startWorkbench, type WorkbenchApplication } from "../../src/server.ts";
 import { WorkbenchStore } from "../../src/storage.ts";
 import { createFauxConversationDriver } from "./conversation-faux-driver.ts";
@@ -92,7 +92,11 @@ test("HTTP chat streams frozen references through Pi and resumes after restart",
 	let headers = { "Content-Type": "application/json", "X-Workbench-Token": bootstrap.token };
 	const path = `/api/projects/${project.id}/datasets/${dataset.id}/conversations`;
 	const defaultSelection = { provider: "openai", modelId: "fixture", thinkingLevel: "off", persist: true };
-	assert.equal((await fetch(`${app.url}/api/chat/model`, { method: "PUT", headers, body: JSON.stringify(defaultSelection) })).status, 200);
+	assert.equal(
+		(await fetch(`${app.url}/api/chat/model`, { method: "PUT", headers, body: JSON.stringify(defaultSelection) }))
+			.status,
+		200,
+	);
 	const attachments = Array.from({ length: 4 }, (_, index) => ({
 		name: `reference-${index}.sql`,
 		mediaType: "text/plain",
@@ -114,7 +118,9 @@ test("HTTP chat streams frozen references through Pi and resumes after restart",
 	assert.equal(conversation.modelState.model?.id, "fixture");
 	assert.ok(conversation.sessionFile, "Selection-only sessions have a durable real Pi checkpoint");
 	const selectedResponse = await fetch(`${app.url}${path}/${conversation.id}/model`, {
-		method: "PUT", headers, body: JSON.stringify({ ...defaultSelection, modelId: "fixture-second", persist: false }),
+		method: "PUT",
+		headers,
+		body: JSON.stringify({ ...defaultSelection, modelId: "fixture-second", persist: false }),
 	});
 	assert.equal(selectedResponse.status, 200, await selectedResponse.clone().text());
 	assert.equal(((await selectedResponse.json()) as SessionModelState).model?.id, "fixture-second");
@@ -125,8 +131,19 @@ test("HTTP chat streams frozen references through Pi and resumes after restart",
 		{ ...defaultSelection, thinkingLevel: "max" },
 		{ ...defaultSelection, persist: "true" },
 		{ ...defaultSelection, extra: true },
-	]) assert.ok((await fetch(`${app.url}${path}/${conversation.id}/model`, { method: "PUT", headers, body: JSON.stringify(invalid) })).status >= 400);
-	const selectionOnly = (await (await fetch(`${app.url}${path}/${conversation.id}`, { headers })).json()) as Conversation;
+	])
+		assert.ok(
+			(
+				await fetch(`${app.url}${path}/${conversation.id}/model`, {
+					method: "PUT",
+					headers,
+					body: JSON.stringify(invalid),
+				})
+			).status >= 400,
+		);
+	const selectionOnly = (await (
+		await fetch(`${app.url}${path}/${conversation.id}`, { headers })
+	).json()) as Conversation;
 	assert.equal(selectionOnly.modelState.model?.id, "fixture-second");
 	assert.deepEqual(selectionOnly.scope, conversation.scope);
 	assert.deepEqual(selectionOnly.messages, []);
@@ -136,9 +153,19 @@ test("HTTP chat streams frozen references through Pi and resumes after restart",
 	app = await startWorkbench({ dataDir, port: 0, conversationDriver: fixture.driver, providers: fixture.providers });
 	bootstrap = (await (await fetch(`${app.url}/api/bootstrap`)).json()) as Bootstrap;
 	headers = { "Content-Type": "application/json", "X-Workbench-Token": bootstrap.token };
-	assert.equal(((await (await fetch(`${app.url}/api/chat/model`, { headers })).json()) as SessionModelState).model?.id, "fixture", "Session-only selection does not change the profile default");
-	const selectedAfterRestart = (await (await fetch(`${app.url}${path}/${conversation.id}`, { headers })).json()) as Conversation;
-	assert.equal(selectedAfterRestart.modelState.model?.id, "fixture-second", "Pi restores a selection-only session before its first prompt");
+	assert.equal(
+		((await (await fetch(`${app.url}/api/chat/model`, { headers })).json()) as SessionModelState).model?.id,
+		"fixture",
+		"Session-only selection does not change the profile default",
+	);
+	const selectedAfterRestart = (await (
+		await fetch(`${app.url}${path}/${conversation.id}`, { headers })
+	).json()) as Conversation;
+	assert.equal(
+		selectedAfterRestart.modelState.model?.id,
+		"fixture-second",
+		"Pi restores a selection-only session before its first prompt",
+	);
 	assert.deepEqual(selectedAfterRestart.scope, conversation.scope);
 	assert.deepEqual(selectedAfterRestart.messages, []);
 	assert.equal(await readFile(selectionOnly.sessionFile!, "utf8"), selectionCheckpoint);
@@ -225,7 +252,16 @@ test("HTTP chat streams frozen references through Pi and resumes after restart",
 					body: JSON.stringify({ mode: "execute" }),
 				});
 				assert.equal(busyPatchResponse.status, 409);
-				assert.equal((await fetch(`${app.url}${path}/${conversation.id}/model`, { method: "PUT", headers, body: JSON.stringify(defaultSelection) })).status, 409);
+				assert.equal(
+					(
+						await fetch(`${app.url}${path}/${conversation.id}/model`, {
+							method: "PUT",
+							headers,
+							body: JSON.stringify(defaultSelection),
+						})
+					).status,
+					409,
+				);
 				release();
 			}
 			deltas++;
@@ -239,7 +275,11 @@ test("HTTP chat streams frozen references through Pi and resumes after restart",
 	assert.ok(completed.sessionFile);
 	assert.deepEqual(completed.scope, conversation.scope);
 	assert.equal(completed.modelState.model?.id, "fixture-second");
-	assert.equal(completed.messages.at(-1)?.model?.id, "fixture-second", "Assistant metadata is Pi's actual dispatched model");
+	assert.equal(
+		completed.messages.at(-1)?.model?.id,
+		"fixture-second",
+		"Assistant metadata is Pi's actual dispatched model",
+	);
 	assert.equal(fixture.seen.length, 1);
 	assert.ok(JSON.stringify(fixture.seen[0]).includes("reference-0.sql"));
 	assert.deepEqual(fixture.seen[0].tools ?? [], [], "Plan mode exposes no proposal or execution tools");
@@ -266,7 +306,11 @@ test("HTTP chat streams frozen references through Pi and resumes after restart",
 		200,
 		"Archived audit remains readable",
 	);
-	const persistResponse = await fetch(`${app.url}${path}/${conversation.id}/model`, { method: "PUT", headers, body: JSON.stringify({ ...defaultSelection, modelId: "fixture-second" }) });
+	const persistResponse = await fetch(`${app.url}${path}/${conversation.id}/model`, {
+		method: "PUT",
+		headers,
+		body: JSON.stringify({ ...defaultSelection, modelId: "fixture-second" }),
+	});
 	assert.equal(persistResponse.status, 200);
 	await app.close();
 	// A pre-upgrade record lacks modelState; the Pi JSONL remains the restoration authority.
@@ -280,13 +324,21 @@ test("HTTP chat streams frozen references through Pi and resumes after restart",
 	app = await startWorkbench({ dataDir, port: 0, conversationDriver: fixture.driver, providers: fixture.providers });
 	bootstrap = (await (await fetch(`${app.url}/api/bootstrap`)).json()) as Bootstrap;
 	headers = { "Content-Type": "application/json", "X-Workbench-Token": bootstrap.token };
-	assert.equal(((await (await fetch(`${app.url}/api/chat/model`, { headers })).json()) as SessionModelState).model?.id, "fixture-second", "Explicit default persistence survives restart");
+	assert.equal(
+		((await (await fetch(`${app.url}/api/chat/model`, { headers })).json()) as SessionModelState).model?.id,
+		"fixture-second",
+		"Explicit default persistence survives restart",
+	);
 	const restored = (await (await fetch(`${app.url}${path}/${conversation.id}`, { headers })).json()) as Conversation;
 	assert.deepEqual(restored.scope, completed.scope);
 	assert.deepEqual(restored.messages, completed.messages);
 	assert.equal(restored.mode, "plan");
 	assert.equal(restored.title, "Frozen reference analysis");
-	assert.equal(restored.modelState.model?.id, "fixture-second", "Legacy DTO hydrates from the real Pi session, not frozen original scope");
+	assert.equal(
+		restored.modelState.model?.id,
+		"fixture-second",
+		"Legacy DTO hydrates from the real Pi session, not frozen original scope",
+	);
 	assert.equal(restored.scope.modelId, "fixture");
 	let resumed: Conversation | undefined;
 	for await (const frame of frames(

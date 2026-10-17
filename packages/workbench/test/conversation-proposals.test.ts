@@ -535,7 +535,10 @@ test(
 		const { state, projectId, dataset, conversation } = await fixture(context);
 		let fail = true;
 		const pi = await createFauxConversationDriver(state.root);
-		context.after(async () => { await pi.driver.close(); await pi.providers.close(); });
+		context.after(async () => {
+			await pi.driver.close();
+			await pi.providers.close();
+		});
 		const service = new ConversationService(state.store, {
 			...pi.driver,
 			async chat(input, onEvent) {
@@ -576,5 +579,43 @@ test(
 			assert.deepEqual(await state.store.renameProposals(projectId, dataset.id, conversation.id), []);
 			fail = false;
 		}
+	},
+);
+
+test(
+	"model checkpoints remain separate from immutable disclosure and failed-turn commits",
+	{ timeout: 120_000 },
+	async (context) => {
+		const { state, projectId, dataset, conversation } = await fixture(context);
+		const changed = structuredClone(conversation);
+		changed.modelState.thinkingLevel = "xhigh";
+		changed.reasoningEffort = "xhigh";
+		changed.sessionFile = "selection-only.jsonl";
+		await state.store.putConversation(changed);
+		assert.deepEqual(
+			(await state.store.conversation(projectId, dataset.id, conversation.id)).scope,
+			conversation.scope,
+		);
+		const disclosure = structuredClone(changed);
+		disclosure.scope.provider = "another-provider";
+		await assert.rejects(state.store.putConversation(disclosure), status(409));
+		changed.state = "running";
+		await state.store.putConversation(changed);
+		for (const replacement of [
+			{ ...structuredClone(changed), state: "failed" as const, sessionFile: "uncommitted.jsonl" },
+			{
+				...structuredClone(changed),
+				state: "failed" as const,
+				modelState: { ...changed.modelState, thinkingLevel: "max" as const },
+			},
+		])
+			await assert.rejects(state.store.putConversation(replacement), status(409));
+		const unchanged = await state.store.conversation(projectId, dataset.id, conversation.id);
+		assert.equal(unchanged.sessionFile, "selection-only.jsonl");
+		assert.equal(unchanged.modelState.thinkingLevel, "xhigh");
+		changed.state = "failed";
+		await state.store.putConversation(changed);
+		await reopen(state);
+		assert.deepEqual(await state.store.conversation(projectId, dataset.id, conversation.id), changed);
 	},
 );

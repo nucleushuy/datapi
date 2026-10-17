@@ -320,7 +320,12 @@ test("shell actions dispatch conversation events and honor requested destination
 	assert.equal(document.body.dataset.destination, "settings");
 	element("rail-tools").click();
 	element("tools-review-chat").click();
-	assert.deepEqual(events, ["workbench:new-session", "workbench:open-settings", "workbench:open-settings", "workbench:open-tools"]);
+	assert.deepEqual(events, [
+		"workbench:new-session",
+		"workbench:open-settings",
+		"workbench:open-settings",
+		"workbench:open-tools",
+	]);
 	document.dispatchEvent(new StringCustomEvent("workbench:navigate", { detail: "data" }));
 	assert.equal(document.body.dataset.destination, "data");
 	document.dispatchEvent(new StringCustomEvent("workbench:navigate", { detail: "unknown" }));
@@ -344,7 +349,14 @@ test("command settings opens Providers and modal inputs do not trigger backgroun
 	modal.append(prompt);
 	document.body.append(modal);
 	modal.showModal();
-	prompt.dispatchEvent(new browser.KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true, cancelable: true }) as unknown as KeyboardEvent);
+	prompt.dispatchEvent(
+		new browser.KeyboardEvent("keydown", {
+			key: "k",
+			ctrlKey: true,
+			bubbles: true,
+			cancelable: true,
+		}) as unknown as KeyboardEvent,
+	);
 	assert.equal(element<HTMLDialogElement>("command-dialog").open, false);
 	assert.equal(modal.open, true);
 });

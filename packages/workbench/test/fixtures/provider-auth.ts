@@ -47,32 +47,57 @@ export function createAuthTestProvider() {
 					const flow = await interaction.prompt({
 						type: "select",
 						message: "Choose authentication flow",
-						options: [{ id: "browser", label: "Browser" }, { id: "device", label: "Device code" }],
+						options: [
+							{ id: "browser", label: "Browser" },
+							{ id: "device", label: "Device code" },
+						],
 					});
 					if (flow === "device") {
-						interaction.notify({ type: "device_code", userCode: "LOCAL-1234", verificationUri: "https://example.invalid/device", expiresInSeconds: 120 });
+						interaction.notify({
+							type: "device_code",
+							userCode: "LOCAL-1234",
+							verificationUri: "https://example.invalid/device",
+							expiresInSeconds: 120,
+						});
 					} else {
-						interaction.notify({ type: "auth_url", url: "https://example.invalid/authorize?state=fixture", instructions: "Complete the local test flow." });
+						interaction.notify({
+							type: "auth_url",
+							url: "https://example.invalid/authorize?state=fixture",
+							instructions: "Complete the local test flow.",
+						});
 					}
 					await interaction.prompt({ type: "manual_code", message: "Enter authorization code or redirect URL" });
 					interaction.notify({ type: "progress", message: "Completing Pi authentication" });
 					if (failLogin) throw new Error("private-provider-error secret-access-token");
-					return { type: "oauth", access: "secret-access-token", refresh: "secret-refresh-token", expires: Date.now() + 3600000 };
+					return {
+						type: "oauth",
+						access: "secret-access-token",
+						refresh: "secret-refresh-token",
+						expires: Date.now() + 3600000,
+					};
 				},
 				async refresh(credential) {
 					counters.refresh++;
 					return { ...credential, expires: Date.now() + 3600000 };
 				},
-				async toAuth(credential) { return { apiKey: credential.access }; },
+				async toAuth(credential) {
+					return { apiKey: credential.access };
+				},
 			},
 		},
-		async refreshModels() { counters.modelRefresh++; },
+		async refreshModels() {
+			counters.modelRefresh++;
+		},
 	};
 	return {
 		provider,
 		faux,
 		counters,
-		setFailLogin(value: boolean) { failLogin = value; },
-		setAmbient(value: boolean) { ambient = value; },
+		setFailLogin(value: boolean) {
+			failLogin = value;
+		},
+		setAmbient(value: boolean) {
+			ambient = value;
+		},
 	};
 }

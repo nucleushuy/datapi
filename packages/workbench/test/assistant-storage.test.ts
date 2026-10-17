@@ -380,7 +380,10 @@ test("Pi conversations persist a frozen scope and relay streamed deltas", { time
 	});
 	const inputs: Parameters<ConversationDriver["chat"]>[0][] = [];
 	let pi = await createFauxConversationDriver(state.root);
-	context.after(async () => { await pi.driver.close(); await pi.providers.close(); });
+	context.after(async () => {
+		await pi.driver.close();
+		await pi.providers.close();
+	});
 	const driver: ConversationDriver = {
 		...pi.driver,
 		async chat(input, onEvent, signal) {
@@ -506,7 +509,10 @@ test(
 			started = resolve;
 		});
 		const pi = await createFauxConversationDriver(state.root);
-		context.after(async () => { await pi.driver.close(); await pi.providers.close(); });
+		context.after(async () => {
+			await pi.driver.close();
+			await pi.providers.close();
+		});
 		const driver: ConversationDriver = {
 			...pi.driver,
 			async chat(_input, _onEvent, signal) {
@@ -528,10 +534,12 @@ test(
 		});
 		const pending = service.send(project.id, dataset.id, conversation.id, { message: "Start streaming" });
 		await streaming;
-		await service.cancel(project.id, dataset.id, conversation.id);
-		const cancelled = await pending;
+		const cancelled = await service.cancel(project.id, dataset.id, conversation.id);
 		assert.equal(cancelled.state, "failed");
 		assert.equal(cancelled.messages.at(-1)?.state, "cancelled");
+		const settled = await pending;
+		assert.equal(settled.state, "failed");
+		assert.equal(settled.messages.at(-1)?.state, "cancelled");
 	},
 );
 
@@ -546,7 +554,10 @@ test(
 		assert.ok(profile);
 		let driverCalls = 0;
 		const pi = await createFauxConversationDriver(state.root);
-		context.after(async () => { await pi.driver.close(); await pi.providers.close(); });
+		context.after(async () => {
+			await pi.driver.close();
+			await pi.providers.close();
+		});
 		const driver: ConversationDriver = {
 			...pi.driver,
 			async chat() {

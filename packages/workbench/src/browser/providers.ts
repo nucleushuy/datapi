@@ -1,6 +1,15 @@
 import type {
-	ModelThinkingLevel, ProviderAuthEvent, ProviderAuthOperation, ProviderAuthPrompt, ProviderAuthType,
-	ProviderCatalog, ProviderConnectionState, ProviderModel, ProviderSummary, SessionModelSelection, SessionModelState,
+	ModelThinkingLevel,
+	ProviderAuthEvent,
+	ProviderAuthOperation,
+	ProviderAuthPrompt,
+	ProviderAuthType,
+	ProviderCatalog,
+	ProviderConnectionState,
+	ProviderModel,
+	ProviderSummary,
+	SessionModelSelection,
+	SessionModelState,
 } from "../provider-contracts.ts";
 
 interface ProvidersOptions {
@@ -17,10 +26,18 @@ export interface ProvidersController {
 	dispose(): void;
 }
 const connectionLabels: Record<ProviderConnectionState, string> = {
-	disconnected: "Not connected", connecting: "Connecting", waiting_browser: "Waiting for browser authentication",
-	waiting_device: "Waiting for device-code confirmation", verifying: "Verifying", connected: "Connected",
-	expired: "Token expired", reconnect_required: "Reconnection required", cancelled: "Authentication cancelled",
-	failed: "Connection failed", environment: "Available through environment configuration", offline_cached: "Offline but using cached catalog",
+	disconnected: "Not connected",
+	connecting: "Connecting",
+	waiting_browser: "Waiting for browser authentication",
+	waiting_device: "Waiting for device-code confirmation",
+	verifying: "Verifying",
+	connected: "Connected",
+	expired: "Token expired",
+	reconnect_required: "Reconnection required",
+	cancelled: "Authentication cancelled",
+	failed: "Connection failed",
+	environment: "Available through environment configuration",
+	offline_cached: "Offline but using cached catalog",
 };
 
 /** Browser-only interaction adapter. Pi owns credentials, authentication and selected models. */
@@ -38,6 +55,8 @@ export function createProviders(options: ProvidersOptions): ProvidersController 
 	let previousFocus: HTMLElement | null = null;
 	let cancelling = false;
 	let starting = false;
+	let cancelStarting = false;
+	let closeAfterStart = false;
 	let eventSignature = "";
 	let responseRevision = 0;
 	const openedUrls = new Set<string>();
@@ -111,15 +130,22 @@ export function createProviders(options: ProvidersOptions): ProvidersController 
 		}
 		return true;
 	}
-	function current(token: number) { return !disposed && dialog.open && token === generation; }
+	function current(token: number) {
+		return !disposed && dialog.open && token === generation;
+	}
 	function loading(message: string) {
 		const status = node("p", message, "loading-state");
 		status.setAttribute("role", "status");
 		body.replaceChildren(status);
 	}
 	async function changed() {
-		try { await options.onModelsChanged(); }
-		catch { report("The connection changed, but the active session could not be refreshed. Reopen the model picker to retry."); }
+		try {
+			await options.onModelsChanged();
+		} catch {
+			report(
+				"The connection changed, but the active session could not be refreshed. Reopen the model picker to retry.",
+			);
+		}
 	}
 	function authDescription(value: ProviderSummary) {
 		if (value.source === "virtual") return "Pi routing";
@@ -147,14 +173,26 @@ export function createProviders(options: ProvidersOptions): ProvidersController 
 				if (!`${value.name} ${value.id}`.toLocaleLowerCase().includes(query)) continue;
 				const row = node("li", undefined, "provider-row");
 				row.dataset.provider = value.id;
-				const initials = value.name.split(/\s+/).slice(0, 2).map((part) => part[0] ?? "").join("").toLocaleUpperCase();
+				const initials = value.name
+					.split(/\s+/)
+					.slice(0, 2)
+					.map((part) => part[0] ?? "")
+					.join("")
+					.toLocaleUpperCase();
 				const icon = node("span", initials, "provider-initials");
 				icon.setAttribute("aria-hidden", "true");
 				const copy = node("div", undefined, "provider-row-copy");
 				copy.append(node("h3", value.name));
 				const status = node("span", connectionLabels[value.state], "provider-status");
 				status.dataset.state = value.state;
-				copy.append(status, node("p", `${authDescription(value)} · ${value.modelCount.toLocaleString()} available models`, "provider-meta"));
+				copy.append(
+					status,
+					node(
+						"p",
+						`${authDescription(value)} · ${value.modelCount.toLocaleString()} available models`,
+						"provider-meta",
+					),
+				);
 				if (value.message) copy.append(node("p", value.message, "provider-meta"));
 				const action = button(value.configured ? "Manage" : "Connect", () => account(value));
 				action.setAttribute("aria-label", `${value.configured ? "Manage" : "Connect"} ${value.name}`);
@@ -165,7 +203,18 @@ export function createProviders(options: ProvidersOptions): ProvidersController 
 		}
 		search.addEventListener("input", filter);
 		filter();
-		body.append(node("p", "Connect once for this local profile. Pi manages authentication and discovers the models available to you.", "providers-intro"), search, list, empty, node("p", catalog?.guidance ?? "", "providers-footnote"), button("Choose a model", () => void loadModels(null)));
+		body.append(
+			node(
+				"p",
+				"Connect once for this local profile. Pi manages authentication and discovers the models available to you.",
+				"providers-intro",
+			),
+			search,
+			list,
+			empty,
+			node("p", catalog?.guidance ?? "", "providers-footnote"),
+			button("Choose a model", () => void loadModels(null)),
+		);
 	}
 	async function loadProviders(providerId?: string) {
 		if (!show() || starting || (operation && !operation.done)) return;
@@ -185,39 +234,123 @@ export function createProviders(options: ProvidersOptions): ProvidersController 
 			report("Providers could not be loaded. Check your local connection and try again.");
 		}
 	}
+	function connectionAvailable(value: ProviderSummary) {
+		return (
+			value.configured &&
+			(value.state === "connected" || value.state === "offline_cached" || value.state === "environment")
+		);
+	}
 	function account(value: ProviderSummary) {
 		provider = value;
 		screen(`Connect ${value.name}`, 2);
 		const savedKey = value.storedAuthType === "api_key";
-		body.append(node("p", value.configured ? `A ${value.name} connection is already available for this profile.` : `Choose how to connect ${value.name}.`, "providers-intro"));
-		if (value.configured) {
+		const available = connectionAvailable(value);
+		body.append(
+			node(
+				"p",
+				available
+					? `A ${value.name} connection is already available for this profile.`
+					: `Choose how to connect ${value.name}.`,
+				"providers-intro",
+			),
+		);
+		if (available) {
 			const actions = node("div", undefined, "providers-actions");
-			actions.append(button(savedKey ? "Continue with saved API key" : value.authType === "oauth" ? "Continue with connected account" : "Continue with configured connection", () => void continueProvider(value), true));
-			if (savedKey && value.auth.apiKey?.interactive) actions.append(button("Replace API key", () => void startAuth(value, "api_key")));
-			else if (value.authType === "oauth" && value.auth.oauth) actions.append(button("Use another account", () => void startAuth(value, "oauth")));
-			if (value.storedAuthType || value.source === "runtime") actions.append(button("Disconnect", () => confirmDisconnect(value)));
+			actions.append(
+				button(
+					savedKey
+						? "Continue with saved API key"
+						: value.authType === "oauth"
+							? "Continue with connected account"
+							: "Continue with configured connection",
+					() => void continueProvider(value),
+					true,
+				),
+			);
+			if (savedKey && value.auth.apiKey?.interactive)
+				actions.append(button("Replace API key", () => void startAuth(value, "api_key")));
+			else if (value.authType === "oauth" && value.auth.oauth)
+				actions.append(button("Use another account", () => void startAuth(value, "oauth")));
+			if (value.storedAuthType || value.source === "runtime")
+				actions.append(button("Disconnect", () => confirmDisconnect(value)));
 			body.append(actions);
 		}
+		if (!available && (value.storedAuthType || value.source === "runtime"))
+			body.append(button("Disconnect", () => confirmDisconnect(value)));
 		const methods = node("div", undefined, "providers-methods");
-		if ((!value.configured || value.authType !== "oauth") && value.auth.oauth) {
-			methods.append(button(value.auth.oauth.label, () => void startAuth(value, "oauth"), !value.configured));
-			if (value.auth.oauth.subscription) methods.append(node("p", "Subscription authentication supported. This is not verification of your plan.", "providers-footnote"));
+		if ((!available || value.authType !== "oauth") && value.auth.oauth) {
+			methods.append(button(value.auth.oauth.label, () => void startAuth(value, "oauth"), !available));
+			if (value.auth.oauth.subscription)
+				methods.append(
+					node(
+						"p",
+						"Subscription authentication supported. This is not verification of your plan.",
+						"providers-footnote",
+					),
+				);
 		}
-		if ((!value.configured || !savedKey) && value.auth.apiKey?.interactive) methods.append(button(value.auth.apiKey.label, () => void startAuth(value, "api_key")));
+		if ((!available || !savedKey) && value.auth.apiKey?.interactive)
+			methods.append(button(value.auth.apiKey.label, () => void startAuth(value, "api_key")));
 		if (methods.childElementCount) body.append(methods);
-		if (!value.configured && !value.auth.oauth && !value.auth.apiKey?.interactive) body.append(node("p", "This provider uses ambient configuration rather than an interactive sign-in. Configure it in the server environment, then refresh Providers.", "providers-footnote"), button("Refresh providers", () => void loadProviders(value.id)));
-		if (value.auth.oauth) body.append(node("p", `You’ll sign in securely on ${value.name}. This app never asks for or sees your provider password. Connecting another account replaces the saved ${value.name} connection for this profile.`, "providers-footnote"));
-		body.append(node("p", "Pi checks whether authentication is configured; this does not verify account identity, key validity, or model entitlement.", "providers-footnote"), button("Back to providers", renderProviders));
+		if (!available && !value.auth.oauth && !value.auth.apiKey?.interactive)
+			body.append(
+				node(
+					"p",
+					"This provider uses ambient configuration rather than an interactive sign-in. Configure it in the server environment, then refresh Providers.",
+					"providers-footnote",
+				),
+				button("Refresh providers", () => void loadProviders(value.id)),
+			);
+		if (value.auth.oauth && !savedKey)
+			body.append(
+				node(
+					"p",
+					`You’ll sign in securely on ${value.name}. This app never asks for or sees your provider password. Connecting another account replaces the saved ${value.name} connection for this profile.`,
+					"providers-footnote",
+				),
+			);
+		if (savedKey)
+			body.append(
+				node(
+					"p",
+					`Replacing the API key replaces the saved ${value.name} credential for this profile. Pi does not verify the person or organization that owns a key.`,
+					"providers-footnote",
+				),
+			);
+		body.append(
+			node(
+				"p",
+				"Pi checks whether authentication is configured; this does not verify account identity, key validity, or model entitlement.",
+				"providers-footnote",
+			),
+			button("Back to providers", renderProviders),
+		);
 	}
 	async function continueProvider(value: ProviderSummary) {
 		const token = ++generation;
 		loading("Checking configuration and refreshing available models…");
 		try {
-			const result = await options.request<ProviderCatalog>(`/api/providers/${encodeURIComponent(value.id)}/continue`, { method: "POST" });
+			const result = await options.request<ProviderCatalog>(
+				`/api/providers/${encodeURIComponent(value.id)}/continue`,
+				{ method: "POST" },
+			);
 			if (!current(token)) return;
 			catalog = result;
 			await changed();
-			if (current(token)) await loadModels(value.id);
+			if (!current(token)) return;
+			const selected = result.providers.find((item) => item.id === value.id);
+			if (!selected) {
+				renderProviders();
+				report("This provider is no longer available. Choose a provider to reconnect.");
+				return;
+			}
+			if (!connectionAvailable(selected)) {
+				account(selected);
+				report(`${connectionLabels[selected.state]}${selected.message ? ` · ${selected.message}` : ""}`);
+				return;
+			}
+			provider = selected;
+			await loadModels(selected.id);
 		} catch {
 			if (!current(token)) return;
 			account(value);
@@ -226,16 +359,27 @@ export function createProviders(options: ProvidersOptions): ProvidersController 
 	}
 	function confirmDisconnect(value: ProviderSummary) {
 		screen(`Disconnect ${value.name}?`, 2);
-		body.append(node("p", "Disconnecting removes the credential saved by this application. It may not revoke provider access or remove credentials configured through environment variables.", "providers-intro"));
+		body.append(
+			node(
+				"p",
+				"Disconnecting removes the credential saved by this application. It may not revoke provider access or remove credentials configured through environment variables.",
+				"providers-intro",
+			),
+		);
 		const actions = node("div", undefined, "button-row");
-		actions.append(button("Keep connection", () => account(value)), button("Disconnect", () => void disconnect(value)));
+		actions.append(
+			button("Keep connection", () => account(value)),
+			button("Disconnect", () => void disconnect(value)),
+		);
 		body.append(actions);
 	}
 	async function disconnect(value: ProviderSummary) {
 		const token = ++generation;
 		loading("Removing saved connection and rechecking configuration…");
 		try {
-			const result = await options.request<ProviderCatalog>(`/api/providers/${encodeURIComponent(value.id)}`, { method: "DELETE" });
+			const result = await options.request<ProviderCatalog>(`/api/providers/${encodeURIComponent(value.id)}`, {
+				method: "DELETE",
+			});
 			if (!current(token)) return;
 			catalog = result;
 			renderProviders();
@@ -252,15 +396,30 @@ export function createProviders(options: ProvidersOptions): ProvidersController 
 	const authEvents = node("div", undefined, "provider-auth-events");
 	const authPrompts = node("div", undefined, "provider-auth-prompts");
 	const authActions = node("div", undefined, "button-row");
-	function authScreen(value: ProviderSummary) {
+	function authScreen(value: ProviderSummary, type: ProviderAuthType) {
 		screen(`Connect ${value.name}`, 3);
 		authStatus.textContent = "Starting authentication…";
 		authEvents.replaceChildren();
 		authPrompts.replaceChildren();
 		authActions.replaceChildren(button("Cancel authentication", () => void cancelAuth()));
 		body.append(authStatus, authEvents, authPrompts, authActions);
-		if (value.auth.oauth) body.append(node("p", "Choose another account on the provider page, or sign out there before continuing.", "providers-footnote"));
-		body.append(node("p", "Sign-in takes place with the provider. Never enter your provider password here. Pi keeps one saved connection per provider in this profile.", "providers-footnote"));
+		if (type === "oauth")
+			body.append(
+				node(
+					"p",
+					"Choose another account on the provider page, or sign out there before continuing.",
+					"providers-footnote",
+				),
+			);
+		body.append(
+			node(
+				"p",
+				type === "oauth"
+					? "Sign-in takes place with the provider. Never enter your provider password here. Pi keeps one saved connection per provider in this profile."
+					: "Paste your API key into the masked field requested by Pi. Never enter your provider password. The key is cleared immediately after submission and is saved only by Pi on this server.",
+				"providers-footnote",
+			),
+		);
 	}
 	async function startAuth(value: ProviderSummary, type: ProviderAuthType) {
 		if (starting || (operation && !operation.done)) return;
@@ -268,17 +427,34 @@ export function createProviders(options: ProvidersOptions): ProvidersController 
 		provider = value;
 		operation = null;
 		starting = true;
+		cancelStarting = false;
+		closeAfterStart = false;
 		clearTimers();
 		operationAbort?.abort();
 		operationAbort = new AbortController();
 		openedUrls.clear();
 		eventSignature = "";
-		authScreen(value);
+		authScreen(value, type);
 		try {
-			const result = await options.request<ProviderAuthOperation>(`/api/providers/${encodeURIComponent(value.id)}/auth`, { method: "POST", body: JSON.stringify({ type }) });
+			const result = await options.request<ProviderAuthOperation>(
+				`/api/providers/${encodeURIComponent(value.id)}/auth`,
+				{ method: "POST", body: JSON.stringify({ type }) },
+			);
 			starting = false;
 			if (!current(token)) {
-				if (!result.done) await options.request(`/api/provider-auth/${encodeURIComponent(result.id)}`, { method: "DELETE", keepalive: disposed });
+				if (!result.done)
+					await options.request(`/api/provider-auth/${encodeURIComponent(result.id)}`, {
+						method: "DELETE",
+						keepalive: disposed,
+					});
+				return;
+			}
+			if (cancelStarting) {
+				operation = result;
+				if (result.done) updateOperation(result);
+				if (await cancelAuth()) {
+					if (closeAfterStart && current(token)) finishClose();
+				}
 				return;
 			}
 			updateOperation(result);
@@ -292,11 +468,20 @@ export function createProviders(options: ProvidersOptions): ProvidersController 
 	function safeUrl(raw: string) {
 		try {
 			const url = new URL(raw);
-			return /^https?:\/\//i.test(raw) && !/[\u0000-\u0020\u007f]/.test(raw) && !url.username && !url.password && (url.protocol === "https:" || url.protocol === "http:");
-		} catch { return false; }
+			return (
+				/^https?:\/\//i.test(raw) &&
+				!/[\u0000-\u0020\u007f]/.test(raw) &&
+				!url.username &&
+				!url.password &&
+				(url.protocol === "https:" || url.protocol === "http:")
+			);
+		} catch {
+			return false;
+		}
 	}
 	function link(url: string, label: string) {
-		if (!safeUrl(url)) return node("span", "The provider supplied a link that cannot be opened safely.", "inline-error");
+		if (!safeUrl(url))
+			return node("span", "The provider supplied a link that cannot be opened safely.", "inline-error");
 		const anchor = node("a", label, "provider-auth-link");
 		anchor.setAttribute("href", url);
 		anchor.target = "_blank";
@@ -320,8 +505,12 @@ export function createProviders(options: ProvidersOptions): ProvidersController 
 		if (!safeUrl(url)) return;
 		try {
 			const opened = window.open(url, "_blank", "noopener,noreferrer");
-			feedback.textContent = opened ? "Browser opened. Complete sign-in there, then return here." : "If no browser opened, your browser may have blocked the popup. Use the link below or copy it into a new tab.";
-		} catch { feedback.textContent = "The browser could not be opened. Use the link below or copy it into a new tab."; }
+			feedback.textContent = opened
+				? "Browser opened. Complete sign-in there, then return here."
+				: "If no browser opened, your browser may have blocked the popup. Use the link below or copy it into a new tab.";
+		} catch {
+			feedback.textContent = "The browser could not be opened. Use the link below or copy it into a new tab.";
+		}
 	}
 	function renderEvents(events: ProviderAuthEvent[]) {
 		const signature = JSON.stringify(events);
@@ -343,28 +532,48 @@ export function createProviders(options: ProvidersOptions): ProvidersController 
 				if (safeUrl(event.url)) {
 					section.append(link(event.url, event.url));
 					const actions = node("div", undefined, "button-row");
-					actions.append(button("Open browser again", () => openBrowser(event.url, feedback)), copyButton(event.url, "Copy authentication link"));
+					actions.append(
+						button("Open browser again", () => openBrowser(event.url, feedback)),
+						copyButton(event.url, "Copy authentication link"),
+					);
 					section.append(actions, feedback);
-					if (!openedUrls.has(event.url)) { openedUrls.add(event.url); openBrowser(event.url, feedback); }
+					if (!openedUrls.has(event.url)) {
+						openedUrls.add(event.url);
+						openBrowser(event.url, feedback);
+					}
 				} else section.append(link(event.url, event.url));
 			} else {
-				section.append(node("p", "Enter this code on the provider page", "providers-footnote"), node("code", event.userCode, "provider-device-code"), copyButton(event.userCode, "Copy device code"), link(event.verificationUri, event.verificationUri));
+				section.append(
+					node("p", "Enter this code on the provider page", "providers-footnote"),
+					node("code", event.userCode, "provider-device-code"),
+					copyButton(event.userCode, "Copy device code"),
+					link(event.verificationUri, event.verificationUri),
+				);
+				if (safeUrl(event.verificationUri))
+					section.append(copyButton(event.verificationUri, "Copy verification link"));
 				if (event.expiresAt && Number.isFinite(Date.parse(event.expiresAt))) {
 					const timer = node("p", undefined, "provider-device-expiry");
 					countdowns.push({ node: timer, expiry: Date.parse(event.expiresAt) });
 					section.append(timer);
 				}
-				section.append(node("p", "Waiting for device-code confirmation. Pi handles provider polling.", "providers-footnote"));
+				section.append(
+					node("p", "Waiting for device-code confirmation. Pi handles provider polling.", "providers-footnote"),
+				);
 			}
 			authEvents.append(section);
 		}
 		function tick() {
 			for (const item of countdowns) {
 				const seconds = Math.max(0, Math.ceil((item.expiry - Date.now()) / 1000));
-				item.node.textContent = seconds ? `Code expires in ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}` : "Code expiry reached. Waiting for Pi’s authentication result.";
+				item.node.textContent = seconds
+					? `Code expires in ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`
+					: "Code expiry reached. Waiting for Pi’s authentication result.";
 			}
 		}
-		if (countdowns.length) { tick(); expiryTimer = window.setInterval(tick, 1000); }
+		if (countdowns.length) {
+			tick();
+			expiryTimer = window.setInterval(tick, 1000);
+		}
 	}
 	function renderPrompt(prompt: ProviderAuthPrompt) {
 		const form = node("form", undefined, "provider-auth-prompt");
@@ -377,7 +586,10 @@ export function createProviders(options: ProvidersOptions): ProvidersController 
 		control.required = true;
 		if (prompt.type === "select") {
 			for (const choice of prompt.options) {
-				const option = node("option", choice.description ? `${choice.label} — ${choice.description}` : choice.label);
+				const option = node(
+					"option",
+					choice.description ? `${choice.label} — ${choice.description}` : choice.label,
+				);
 				option.value = choice.id;
 				control.append(option);
 			}
@@ -400,28 +612,48 @@ export function createProviders(options: ProvidersOptions): ProvidersController 
 			if (!operation || operation.done || !control.value || submit.disabled) return;
 			const id = operation.id;
 			const token = generation;
-			++responseRevision;
+			const revision = ++responseRevision;
 			// The answer exists only in this outgoing request, never retained controller state.
-			const request = options.request<ProviderAuthOperation>(`/api/provider-auth/${encodeURIComponent(id)}`, { method: "POST", body: JSON.stringify({ promptId: prompt.id, value: control.value }) });
+			const request = options.request<ProviderAuthOperation>(`/api/provider-auth/${encodeURIComponent(id)}`, {
+				method: "POST",
+				body: JSON.stringify({ promptId: prompt.id, value: control.value }),
+			});
 			control.value = "";
 			control.disabled = true;
 			submit.disabled = true;
 			window.clearTimeout(pollTimer);
-			void request.then((result) => {
-				if (current(token) && operation?.id === id && !cancelling && !operation.done) updateOperation(result);
-			}).catch(() => {
-				if (!current(token) || operation?.id !== id || cancelling || operation.done) return;
-				control.disabled = false;
-				submit.disabled = false;
-				report("The response could not be submitted. If Pi still requests it, enter it again.");
-				schedulePoll();
-			});
+			void request
+				.then((result) => {
+					if (
+						current(token) &&
+						operation?.id === id &&
+						revision === responseRevision &&
+						!cancelling &&
+						!operation.done
+					)
+						updateOperation(result);
+				})
+				.catch(() => {
+					if (
+						!current(token) ||
+						operation?.id !== id ||
+						revision !== responseRevision ||
+						cancelling ||
+						operation.done
+					)
+						return;
+					control.disabled = false;
+					submit.disabled = false;
+					report("The response could not be submitted. If Pi still requests it, enter it again.");
+					schedulePoll();
+				});
 		});
 		prompts.set(prompt.id, { form, control });
 		authPrompts.append(form);
 	}
 	function updateOperation(result: ProviderAuthOperation) {
-		operation = result;
+		operation = result.done ? { ...result, prompts: [], events: [] } : result;
+		const focusedPrompt = [...prompts.values()].some((item) => item.form.contains(document.activeElement));
 		authStatus.textContent = `${connectionLabels[result.state]}${result.message ? ` · ${result.message}` : ""}`;
 		authStatus.dataset.state = result.state;
 		for (const [id, item] of prompts) {
@@ -434,6 +666,11 @@ export function createProviders(options: ProvidersOptions): ProvidersController 
 		if (!result.done) {
 			renderEvents(result.events);
 			for (const prompt of result.prompts) if (!prompts.has(prompt.id)) renderPrompt(prompt);
+			if (document.activeElement === heading || (focusedPrompt && !authPrompts.contains(document.activeElement))) {
+				const first = prompts.values().next().value;
+				if (first) first.control.focus();
+				else heading.focus();
+			}
 			schedulePoll();
 			return;
 		}
@@ -444,7 +681,9 @@ export function createProviders(options: ProvidersOptions): ProvidersController 
 		authActions.replaceChildren();
 		if (result.state === "connected" || result.state === "offline_cached" || result.state === "environment") {
 			const token = generation;
-			void changed().then(() => { if (current(token)) void loadModels(result.providerId); });
+			void changed().then(() => {
+				if (current(token) && !closeAfterStart) void loadModels(result.providerId);
+			});
 		} else {
 			authActions.append(button("Back to connection", () => void loadProviders(result.providerId)));
 			void changed();
@@ -461,12 +700,22 @@ export function createProviders(options: ProvidersOptions): ProvidersController 
 		const token = generation;
 		const revision = responseRevision;
 		try {
-			const result = await options.request<ProviderAuthOperation>(`/api/provider-auth/${encodeURIComponent(id)}`, { signal: operationAbort?.signal });
-			if (current(token) && operation?.id === id && revision === responseRevision && !cancelling && !operation.done) updateOperation(result);
+			const result = await options.request<ProviderAuthOperation>(`/api/provider-auth/${encodeURIComponent(id)}`, {
+				signal: operationAbort?.signal,
+			});
+			if (current(token) && operation?.id === id && revision === responseRevision && !cancelling && !operation.done)
+				updateOperation(result);
 		} catch {
-			if (!current(token) || operation?.id !== id || revision !== responseRevision || cancelling || operation.done) return;
+			if (!current(token) || operation?.id !== id || revision !== responseRevision || cancelling || operation.done)
+				return;
 			report("Authentication status could not be refreshed. Check the local connection, then retry or cancel.");
-			authActions.replaceChildren(button("Retry status", () => { report(""); void poll(); }), button("Cancel authentication", () => void cancelAuth()));
+			authActions.replaceChildren(
+				button("Retry status", () => {
+					report("");
+					void poll();
+				}),
+				button("Cancel authentication", () => void cancelAuth()),
+			);
 		}
 	}
 	async function cancelAuth() {
@@ -477,10 +726,11 @@ export function createProviders(options: ProvidersOptions): ProvidersController 
 		operationAbort?.abort();
 		++responseRevision;
 		if (starting) {
-			++generation;
-			authStatus.textContent = "Authentication cancelled. Any pending start will be cancelled when it returns.";
-			authActions.replaceChildren(button("Back to providers", () => void loadProviders()));
-			return true;
+			cancelStarting = true;
+			authStatus.textContent =
+				"Cancelling authentication… Waiting for the local operation to start so Pi can stop it.";
+			authActions.replaceChildren();
+			return false;
 		}
 		if (!operation || operation.done) return true;
 		cancelling = true;
@@ -488,7 +738,9 @@ export function createProviders(options: ProvidersOptions): ProvidersController 
 		const token = generation;
 		authStatus.textContent = "Cancelling authentication…";
 		try {
-			const result = await options.request<ProviderAuthOperation>(`/api/provider-auth/${encodeURIComponent(id)}`, { method: "DELETE" });
+			const result = await options.request<ProviderAuthOperation>(`/api/provider-auth/${encodeURIComponent(id)}`, {
+				method: "DELETE",
+			});
 			cancelling = false;
 			if (current(token)) updateOperation(result);
 			return true;
@@ -517,17 +769,31 @@ export function createProviders(options: ProvidersOptions): ProvidersController 
 			renderModels(available.models, available.guidance, state, providerId);
 		} catch {
 			if (!current(token)) return;
-			body.replaceChildren(button("Try again", () => void loadModels(providerId)), button("Manage providers", () => void loadProviders()));
+			body.replaceChildren(
+				button("Try again", () => void loadModels(providerId)),
+				button("Manage providers", () => void loadProviders()),
+			);
 			report("Available models or the active session could not be loaded. Try again.");
 		}
 	}
 	function modelName(model: ProviderModel) {
 		return model.virtual && model.provider === "router" && model.id === "auto" ? "Auto — Pi chooses" : model.name;
 	}
-	function renderModels(models: ProviderModel[], guidance: string, state: SessionModelState, providerId: string | null) {
+	function renderModels(
+		models: ProviderModel[],
+		guidance: string,
+		state: SessionModelState,
+		providerId: string | null,
+	) {
 		body.replaceChildren();
 		const names = new Map(catalog?.providers.map((item) => [item.id, item.name]));
-		const currentModel = node("p", state.model ? `Current session: ${modelName(state.model)} · ${state.thinkingLevel} thinking` : "No model selected for this session.", "providers-intro");
+		const currentModel = node(
+			"p",
+			state.model
+				? `Current session: ${modelName(state.model)} · ${state.thinkingLevel} thinking`
+				: "No model selected for this session.",
+			"providers-intro",
+		);
 		const search = node("input");
 		search.type = "search";
 		search.placeholder = "Search models, providers or capabilities";
@@ -542,6 +808,11 @@ export function createProviders(options: ProvidersOptions): ProvidersController 
 			option.value = id;
 			providerFilter.append(option);
 		}
+		if (providerId && !models.some((model) => model.provider === providerId)) {
+			const option = node("option", names.get(providerId) ?? providerId);
+			option.value = providerId;
+			providerFilter.append(option);
+		}
 		providerFilter.value = providerId ?? "";
 		const filters = node("div", undefined, "provider-model-filters");
 		filters.append(search, providerFilter);
@@ -550,7 +821,10 @@ export function createProviders(options: ProvidersOptions): ProvidersController 
 		const rows = node("div");
 		list.append(rows);
 		const empty = node("div", undefined, "providers-empty");
-		empty.append(node("p", "No available models match. Change the filters or connect a provider."), button("Manage providers", () => void loadProviders()));
+		empty.append(
+			node("p", "No available models match. Change the filters or connect a provider."),
+			button("Manage providers", () => void loadProviders()),
+		);
 		const form = node("form", undefined, "provider-model-form");
 		const thinking = node("select");
 		thinking.setAttribute("aria-label", "Thinking level");
@@ -560,7 +834,11 @@ export function createProviders(options: ProvidersOptions): ProvidersController 
 		persist.type = "checkbox";
 		const persistLabel = node("label", undefined, "provider-default-control");
 		persistLabel.append(persist, node("span", "Use as default for new sessions"));
-		const disclosure = node("p", "Choose a model to review its recipient before applying.", "provider-model-disclosure");
+		const disclosure = node(
+			"p",
+			"Choose a model to review its recipient before applying.",
+			"provider-model-disclosure",
+		);
 		const submit = node("button", "Use model", "button button-primary");
 		submit.type = "submit";
 		submit.disabled = true;
@@ -580,41 +858,75 @@ export function createProviders(options: ProvidersOptions): ProvidersController 
 				: `Future messages may disclose existing approved history to ${names.get(model.provider) ?? model.provider}. Selection does not send a message.`;
 			submit.disabled = selecting;
 		}
-		function metric(label: string, value: string, details: HTMLElement) { details.append(node("dt", label), node("dd", value)); }
+		function metric(label: string, value: string, details: HTMLElement) {
+			details.append(node("dt", label), node("dd", value));
+		}
 		for (const model of models) {
 			const row = node("label", undefined, "provider-model-row");
 			const radio = node("input");
 			radio.type = "radio";
 			radio.name = "provider-model";
+			radio.value = JSON.stringify([model.provider, model.id]);
 			radio.setAttribute("aria-label", `${modelName(model)} — ${names.get(model.provider) ?? model.provider}`);
 			radio.addEventListener("change", () => candidate(model));
 			const copy = node("div", undefined, "provider-model-copy");
 			const title = node("div", undefined, "provider-model-title");
-			title.append(node("strong", modelName(model)), node("span", model.billing === "subscription" ? "Subscription" : model.billing === "virtual" ? "Pi routing" : "API billing", "provider-badge"));
+			title.append(
+				node("strong", modelName(model)),
+				node(
+					"span",
+					model.billing === "subscription"
+						? "Subscription"
+						: model.billing === "virtual"
+							? "Pi routing"
+							: "API billing",
+					"provider-badge",
+				),
+			);
 			copy.append(title, node("p", `${names.get(model.provider) ?? model.provider} · ${model.id}`, "provider-meta"));
 			const details = node("dl", undefined, "provider-model-details");
-			metric("Context", model.contextWindow > 0 ? `${model.contextWindow.toLocaleString()} tokens` : "Not specified", details);
-			metric("Max output", model.maxTokens > 0 ? `${model.maxTokens.toLocaleString()} tokens` : "Not specified", details);
+			metric(
+				"Context",
+				model.contextWindow > 0 ? `${model.contextWindow.toLocaleString("en-US")} tokens` : "Not specified",
+				details,
+			);
+			metric(
+				"Max output",
+				model.maxTokens > 0 ? `${model.maxTokens.toLocaleString("en-US")} tokens` : "Not specified",
+				details,
+			);
 			metric("Input", model.input.join(" + "), details);
 			metric("Reasoning", model.reasoning ? "Supported" : "Not supported", details);
 			metric("Thinking", model.thinkingLevels.join(", ") || "Not specified", details);
-			metric("Price / 1M tokens", model.virtual ? "Depends on routed model" : `$${model.cost.input} input · $${model.cost.output} output`, details);
+			metric(
+				"Price / 1M tokens",
+				model.virtual ? "Depends on routed model" : `$${model.cost.input} input · $${model.cost.output} output`,
+				details,
+			);
 			copy.append(details);
 			row.append(radio, copy);
 			rows.append(row);
 			modelRows.push({ model, row, radio });
-			if (state.model?.provider === model.provider && state.model.id === model.id) { radio.checked = true; candidate(model); }
+			if (state.model?.provider === model.provider && state.model.id === model.id) {
+				radio.checked = true;
+				candidate(model);
+			}
 		}
 		function filter() {
 			const query = search.value.trim().toLocaleLowerCase();
 			let count = 0;
 			for (const item of modelRows) {
 				const { model } = item;
-				item.row.hidden = Boolean(providerFilter.value && model.provider !== providerFilter.value) || !`${model.name} ${model.id} ${model.provider} ${names.get(model.provider) ?? ""} ${model.input.join(" ")} ${model.reasoning ? "reasoning" : ""} ${model.thinkingLevels.join(" ")}`.toLocaleLowerCase().includes(query);
+				item.row.hidden =
+					Boolean(providerFilter.value && model.provider !== providerFilter.value) ||
+					!`${model.name} ${model.id} ${model.provider} ${names.get(model.provider) ?? ""} ${model.input.join(" ")} ${model.reasoning ? "reasoning" : ""} ${model.thinkingLevels.join(" ")}`
+						.toLocaleLowerCase()
+						.includes(query);
 				if (!item.row.hidden) count++;
 			}
 			empty.hidden = count > 0;
 			list.hidden = !count;
+			submit.disabled = selecting || !modelRows.some((item) => item.radio.checked && !item.row.hidden);
 		}
 		search.addEventListener("input", filter);
 		providerFilter.addEventListener("change", filter);
@@ -625,23 +937,41 @@ export function createProviders(options: ProvidersOptions): ProvidersController 
 		form.addEventListener("submit", async (event) => {
 			event.preventDefault();
 			const selected = modelRows.find((item) => item.radio.checked);
-			if (!selected || submit.disabled || selecting) return;
+			if (!selected || selected.row.hidden || submit.disabled || selecting) return;
 			const token = generation;
 			selecting = true;
 			submit.disabled = true;
 			submit.textContent = "Applying to session…";
 			report("");
 			try {
-				const result = await options.onSelectModel({ provider: selected.model.provider, modelId: selected.model.id, thinkingLevel: (thinking.value || "off") as ModelThinkingLevel, persist: persist.checked });
+				const result = await options.onSelectModel({
+					provider: selected.model.provider,
+					modelId: selected.model.id,
+					thinkingLevel: (thinking.value || "off") as ModelThinkingLevel,
+					persist: persist.checked,
+				});
 				if (!current(token)) return;
 				screen("Ready to continue", providerId ? 5 : null);
-				body.append(node("p", result.model ? `Selected ${modelName(result.model)} · ${names.get(result.model.provider) ?? result.model.provider} · ${result.thinkingLevel} thinking` : "Pi reports no selected model.", "providers-intro"), node("p", "The active Pi session is updated. No message has been sent.", "providers-footnote"), button("Done", () => void close(), true), button("Choose another model", () => void loadModels(providerId)));
+				body.append(
+					node(
+						"p",
+						result.model
+							? `Selected ${modelName(result.model)} · ${names.get(result.model.provider) ?? result.model.provider} · ${result.thinkingLevel} thinking`
+							: "Pi reports no selected model.",
+						"providers-intro",
+					),
+					node("p", "The active Pi session is updated. No message has been sent.", "providers-footnote"),
+					button("Done", () => void close(), true),
+					button("Choose another model", () => void loadModels(providerId)),
+				);
 			} catch {
 				if (!current(token)) return;
 				selecting = false;
-				submit.disabled = false;
+				filter();
 				submit.textContent = "Use model";
-				report("The session model could not be changed. Reopen the picker to check the authoritative selection before retrying.");
+				report(
+					"The session model could not be changed. Reopen the picker to check the authoritative selection before retrying.",
+				);
 			}
 		});
 		body.append(currentModel, filters, form, node("p", guidance, "providers-footnote"));
@@ -661,26 +991,57 @@ export function createProviders(options: ProvidersOptions): ProvidersController 
 		if (previousFocus?.isConnected) previousFocus.focus();
 		previousFocus = null;
 	}
-	async function close() { if (await cancelAuth()) finishClose(); }
-	dialog.addEventListener("cancel", (event) => { event.preventDefault(); void close(); });
+	async function close() {
+		if (!starting && (!operation || operation.done)) {
+			finishClose();
+			return;
+		}
+		closeAfterStart = true;
+		const token = generation;
+		if (await cancelAuth()) {
+			if (!disposed && token === generation) finishClose();
+		} else if (!starting) closeAfterStart = false;
+	}
+	dialog.addEventListener("cancel", (event) => {
+		event.preventDefault();
+		void close();
+	});
 	dialog.addEventListener("keydown", (event) => {
 		event.stopPropagation();
-		if (event.key === "Escape") { event.preventDefault(); void close(); }
-		else if (event.key === "Tab") {
-			const focusable = [...dialog.querySelectorAll<HTMLElement>("button, input, select, a[href], [tabindex='0']")].filter((item) => !item.closest("[hidden]") && !item.hasAttribute("disabled"));
+		if (event.key === "Escape") {
+			event.preventDefault();
+			void close();
+		} else if (event.key === "Tab") {
+			const focusable = [
+				...dialog.querySelectorAll<HTMLElement>("button, input, select, a[href], [tabindex='0']"),
+			].filter((item) => !item.closest("[hidden]") && !item.hasAttribute("disabled"));
 			const first = focusable[0];
 			const last = focusable[focusable.length - 1];
-			if (event.shiftKey && (document.activeElement === first || document.activeElement === heading)) { event.preventDefault(); last?.focus(); }
-			else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+			if (event.shiftKey && (document.activeElement === first || document.activeElement === heading)) {
+				event.preventDefault();
+				last?.focus();
+			} else if (!event.shiftKey && document.activeElement === last) {
+				event.preventDefault();
+				first?.focus();
+			}
 		}
 	});
 	return {
-		open: (providerId) => { void loadProviders(providerId); },
-		openModelPicker: () => { void loadModels(null); },
-		close: () => { void close(); },
+		open: (providerId) => {
+			void loadProviders(providerId);
+		},
+		openModelPicker: () => {
+			void loadModels(null);
+		},
+		close: () => {
+			void close();
+		},
 		dispose() {
 			if (disposed) return;
-			if (operation && !operation.done) void options.request(`/api/provider-auth/${encodeURIComponent(operation.id)}`, { method: "DELETE", keepalive: true }).catch(() => {});
+			if (operation && !operation.done)
+				void options
+					.request(`/api/provider-auth/${encodeURIComponent(operation.id)}`, { method: "DELETE", keepalive: true })
+					.catch(() => {});
 			disposed = true;
 			finishClose();
 			dialog.remove();

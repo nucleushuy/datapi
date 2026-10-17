@@ -110,7 +110,14 @@ export function exportConversation(value: Conversation, format: "json" | "markdo
 				sha256,
 			})),
 		},
-		messages: value.messages.map(({ id, role, text, createdAt, state, model }) => ({ id, role, text, createdAt, state, model })),
+		messages: value.messages.map(({ id, role, text, createdAt, state, model }) => ({
+			id,
+			role,
+			text,
+			createdAt,
+			state,
+			model,
+		})),
 		usage: value.usage,
 	};
 	if (format === "json") return JSON.stringify(exported, null, 2);
@@ -144,6 +151,7 @@ export function initializeConversation(container: HTMLElement, options: Conversa
 	let partial = "";
 	let optimisticMessage: string | null = null;
 	let sending = false;
+	let streamGeneration = 0;
 	let loadingSessions = false;
 	let readingFiles = false;
 	let disposed = false;
@@ -1689,12 +1697,17 @@ export function initializeConversation(container: HTMLElement, options: Conversa
 		model.disabled = active || settingsSaving || loadingSessions || loadingModel || proposalActionBusy();
 		const selected = currentModelState();
 		const selectedModel = selected?.model;
-		const available = modelStateReady && !!selectedModel && availableModels.some((item) => item.provider === selectedModel.provider && item.id === selectedModel.id);
+		const available =
+			modelStateReady &&
+			!!selectedModel &&
+			availableModels.some((item) => item.provider === selectedModel.provider && item.id === selectedModel.id);
 		model.textContent = modelLabel(selected);
 		provider.textContent = selectedModel ? `Manage providers · ${selectedModel.provider}` : "Connect a provider";
 		recipientNote.textContent = selectedModel?.virtual
 			? "Auto may route future messages and the approved history to any available configured provider. Selecting a model does not send a message or change the approved context."
-			: selectedModel ? `Next Send shares your message and approved history with ${selectedModel.provider}. Selecting a model does not send a message or change the approved context.` : "Connect a provider and choose a Pi model. No messages are sent by connecting.";
+			: selectedModel
+				? `Next Send shares your message and approved history with ${selectedModel.provider}. Selecting a model does not send a message or change the approved context.`
+				: "Connect a provider and choose a Pi model. No messages are sent by connecting.";
 		const levels = selectedModel?.thinkingLevels ?? [];
 		if ([...reasoning.options].map((item) => item.value).join(",") !== levels.join(",")) {
 			reasoning.replaceChildren(...levels.map(option));
@@ -1727,7 +1740,8 @@ export function initializeConversation(container: HTMLElement, options: Conversa
 		send.hidden = active && !!conversation;
 		cancel.hidden = !active || !conversation;
 		modeSelect.disabled = !context || active || settingsSaving || proposalActionBusy();
-		reasoning.disabled = active || settingsSaving || loadingModel || !available || proposalActionBusy() || !levels.length;
+		reasoning.disabled =
+			active || settingsSaving || loadingModel || !available || proposalActionBusy() || !levels.length;
 		modeSelect.value = mode;
 		reasoning.value = selected?.thinkingLevel ?? "";
 		modeNote.textContent =
@@ -1754,7 +1768,8 @@ export function initializeConversation(container: HTMLElement, options: Conversa
 								: "Ready";
 		headerStatus.textContent = `${state} · ${modelLabel(selected)}`;
 		headerStatus.dataset.state = error || conversation?.state === "failed" ? "error" : active ? "running" : "ready";
-		headerStatus.title = error || (selectedModel ? `${selectedModel.provider} / ${selectedModel.id}` : "Choose a model through Pi");
+		headerStatus.title =
+			error || (selectedModel ? `${selectedModel.provider} / ${selectedModel.id}` : "Choose a model through Pi");
 		usage.textContent = conversation ? `${conversation.usage.totalTokens.toLocaleString()} tokens` : "No usage yet";
 		usage.title = conversation
 			? `Input ${conversation.usage.input} · output ${conversation.usage.output} · cache read ${conversation.usage.cacheRead} · cache write ${conversation.usage.cacheWrite}`
@@ -1765,7 +1780,9 @@ export function initializeConversation(container: HTMLElement, options: Conversa
 			: `Metadata only · no automatic row samples${attachments.length ? ` · ${attachments.length} files ${fileConsent.checked ? "approved" : "await consent"}` : ""}${screenshots.length ? ` · ${screenshots.length} images ${screenshotConsent.checked ? "approved" : "await consent"}` : ""} · inspect Context before Send`;
 		consentSummary.textContent += selectedModel?.virtual
 			? " · Auto: next Send may share approved history with any available configured provider"
-			: selectedModel ? ` · Next Send: ${selectedModel.provider} / ${selectedModel.id}` : " · Choose a provider and model before Send";
+			: selectedModel
+				? ` · Next Send: ${selectedModel.provider} / ${selectedModel.id}`
+				: " · Choose a provider and model before Send";
 		feedback.textContent =
 			feedbackError ||
 			conversation?.error ||
@@ -1869,7 +1886,14 @@ export function initializeConversation(container: HTMLElement, options: Conversa
 						`${new Date(item.createdAt).toLocaleTimeString()}${item.state !== "complete" ? ` · ${item.state}` : ""}`,
 					),
 				);
-				if (item.role === "assistant" && item.model) label.append(node("span", `${item.model.name} · ${item.model.provider} / ${item.model.id}${item.model.thinkingLevel ? ` · ${item.model.thinkingLevel}` : ""}`, "muted"));
+				if (item.role === "assistant" && item.model)
+					label.append(
+						node(
+							"span",
+							`${item.model.name} · ${item.model.provider} / ${item.model.id}${item.model.thinkingLevel ? ` · ${item.model.thinkingLevel}` : ""}`,
+							"muted",
+						),
+					);
 				const content = node("div", undefined, "chat-message-content");
 				if (item.role === "user") content.textContent = item.text;
 				else renderMessageContent(content, item.text);
@@ -2020,15 +2044,17 @@ export function initializeConversation(container: HTMLElement, options: Conversa
 			activityList.append(node("li", "No tool operations recorded for this session."));
 	}
 	function currentModelState(): SessionModelState | null {
-		return conversation ? conversation.modelState ?? null : draftModelState;
+		return conversation ? (conversation.modelState ?? null) : draftModelState;
 	}
 	function modelLabel(state: SessionModelState | null): string {
 		if (!state?.model) return "Choose a model";
-		const label = state.model.virtual ? `${state.model.name} — Pi chooses` : state.model.name;
+		const label = state.model.name;
 		return state.model.virtual && state.routedModel ? `${label} → ${state.routedModel.name}` : label;
 	}
 	function modelEndpoint(): string {
-		return conversation ? `${datasetPath()}/conversations/${encodeURIComponent(conversation.id)}/model` : "/api/chat/model";
+		return conversation
+			? `${datasetPath()}/conversations/${encodeURIComponent(conversation.id)}/model`
+			: "/api/chat/model";
 	}
 	function acceptModelState(state: SessionModelState): void {
 		modelStateReady = true;
@@ -2050,7 +2076,8 @@ export function initializeConversation(container: HTMLElement, options: Conversa
 		renderComposer();
 		try {
 			const state = await options.api<SessionModelState>(modelEndpoint());
-			if (!current(owner) || generation !== modelStateGeneration) throw new Error("The active session changed. Reopen the model picker.");
+			if (!current(owner) || generation !== modelStateGeneration)
+				throw new Error("The active session changed. Reopen the model picker.");
 			acceptModelState(state);
 			return state;
 		} finally {
@@ -2073,7 +2100,8 @@ export function initializeConversation(container: HTMLElement, options: Conversa
 		}
 	}
 	async function selectModel(selection: SessionModelSelection): Promise<SessionModelState> {
-		if (busy() || settingsSaving || sessionSaving || loadingSessions || proposalActionBusy()) throw new Error("Wait for the current operation before changing models.");
+		if (busy() || settingsSaving || sessionSaving || loadingSessions || proposalActionBusy())
+			throw new Error("Wait for the current operation before changing models.");
 		const owner = viewGeneration;
 		++modelStateGeneration;
 		settingsSaving = true;
@@ -2425,13 +2453,17 @@ export function initializeConversation(container: HTMLElement, options: Conversa
 			loadingModel ||
 			!modelStateReady ||
 			!currentModelState()?.model ||
-			!availableModels.some((item) => item.provider === currentModelState()?.model?.provider && item.id === currentModelState()?.model?.id) ||
+			!availableModels.some(
+				(item) =>
+					item.provider === currentModelState()?.model?.provider && item.id === currentModelState()?.model?.id,
+			) ||
 			(!conversation &&
 				((attachments.length > 0 && !fileConsent.checked) ||
 					(screenshots.length > 0 && !screenshotConsent.checked)))
 		)
 			return;
 		const owner = viewGeneration;
+		const generation = ++streamGeneration;
 		const endpoint = `${datasetPath()}/conversations`;
 		const request = input.value.trim();
 		const message = messageWithRole();
@@ -2485,10 +2517,8 @@ export function initializeConversation(container: HTMLElement, options: Conversa
 			input.value = "";
 			autosize();
 			suggestions.hidden = true;
-			streamStatus = "Pi is responding…";
-			render();
 			const value = await options.stream(`${endpoint}/${encodeURIComponent(id)}/messages`, message, (event) => {
-				if (!current(owner) || event.conversationId !== id) return;
+				if (!current(owner) || generation !== streamGeneration || event.conversationId !== id) return;
 				if (event.type === "text") {
 					partial += event.delta;
 					streamStatus = "Pi is responding…";
@@ -2498,16 +2528,16 @@ export function initializeConversation(container: HTMLElement, options: Conversa
 				}
 				render();
 			});
-			if (!current(owner)) return;
+			if (!current(owner) || generation !== streamGeneration) return;
 			conversation = value;
 			remember(value);
 			optimisticMessage = null;
 			partial = "";
 			renderContext();
 		} catch (error) {
-			if (current(owner)) feedbackError = options.message(error);
+			if (current(owner) && generation === streamGeneration) feedbackError = options.message(error);
 		} finally {
-			if (current(owner)) {
+			if (current(owner) && generation === streamGeneration) {
 				sending = false;
 				streamStatus = "";
 				render();
@@ -2636,10 +2666,12 @@ export function initializeConversation(container: HTMLElement, options: Conversa
 		const selected = currentModelState()?.model;
 		const thinkingLevel = selected?.thinkingLevels.find((level) => level === reasoning.value);
 		if (!selected || !thinkingLevel) return;
-		void selectModel({ provider: selected.provider, modelId: selected.id, thinkingLevel, persist: false }).catch((error) => {
-			feedbackError = options.message(error);
-			render();
-		});
+		void selectModel({ provider: selected.provider, modelId: selected.id, thinkingLevel, persist: false }).catch(
+			(error) => {
+				feedbackError = options.message(error);
+				render();
+			},
+		);
 	});
 	form.addEventListener("submit", (event) => {
 		event.preventDefault();
@@ -2655,13 +2687,13 @@ export function initializeConversation(container: HTMLElement, options: Conversa
 			.api<Conversation>(`${datasetPath()}/conversations/${encodeURIComponent(id)}`, { method: "DELETE" })
 			.then((value) => {
 				if (!current(owner)) return;
+				streamGeneration = streamGeneration + 1;
 				conversation = value;
 				remember(value);
+				sending = false;
+				optimisticMessage = null;
+				partial = "";
 				streamStatus = "";
-				if (!sending) {
-					optimisticMessage = null;
-					partial = "";
-				}
 			})
 			.catch((error) => {
 				if (current(owner)) {

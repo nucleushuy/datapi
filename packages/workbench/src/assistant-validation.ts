@@ -67,16 +67,38 @@ function text(value: unknown, max: number, nonempty = true): value is string {
 
 /** Syntax only: Pi remains the authority for identifier availability and capabilities. */
 export function isProviderIdentifier(value: unknown): value is string {
-	return typeof value === "string" && value.length > 0 && value.length <= 256 &&
-		value === value.trim() && !/[\u0000-\u001f\u007f-\u009f\ud800-\udfff]/u.test(value);
+	return (
+		typeof value === "string" &&
+		value.length > 0 &&
+		value.length <= 256 &&
+		value === value.trim() &&
+		!/[\u0000-\u001f\u007f-\u009f\ud800-\udfff]/u.test(value)
+	);
 }
 
 export function parseSessionModelSelection(value: unknown): SessionModelSelection {
-	requireInput(objectWithKeys(value, ["provider", "modelId", "thinkingLevel", "persist"]), "Provide only a provider, model, thinking level and default preference.");
+	requireInput(
+		objectWithKeys(value, ["provider", "modelId", "thinkingLevel", "persist"]),
+		"Provide only a provider, model, thinking level and default preference.",
+	);
 	requireInput(isProviderIdentifier(value.provider), "Choose a valid assistant provider.");
-	requireInput(text(value.modelId, 256) && value.modelId === value.modelId.trim() && !/[\u0000-\u001f\u007f-\u009f\ud800-\udfff]/u.test(value.modelId), "Choose a valid assistant model.");
-	requireInput(CONVERSATION_REASONING_EFFORTS.some((level) => level === value.thinkingLevel) && typeof value.persist === "boolean", "Choose a supported thinking level and an explicit default preference.");
-	return { provider: value.provider, modelId: value.modelId, thinkingLevel: value.thinkingLevel as SessionModelSelection["thinkingLevel"], persist: value.persist as boolean };
+	requireInput(
+		text(value.modelId, 256) &&
+			value.modelId === value.modelId.trim() &&
+			!/[\u0000-\u001f\u007f-\u009f\ud800-\udfff]/u.test(value.modelId),
+		"Choose a valid assistant model.",
+	);
+	requireInput(
+		CONVERSATION_REASONING_EFFORTS.some((level) => level === value.thinkingLevel) &&
+			typeof value.persist === "boolean",
+		"Choose a supported thinking level and an explicit default preference.",
+	);
+	return {
+		provider: value.provider,
+		modelId: value.modelId,
+		thinkingLevel: value.thinkingLevel as SessionModelSelection["thinkingLevel"],
+		persist: value.persist as boolean,
+	};
 }
 
 function expressionUsesDeclaredColumns(expression: TransformExpression, columns: number[]): boolean {
@@ -104,12 +126,11 @@ export function parseAssistantSelection(value: unknown, dataset: Dataset): Assis
 		409,
 	);
 	requireInput(text(value.request, 4000), "Assistant requests must contain 1 to 4000 characters.");
+	requireInput(isProviderIdentifier(value.provider), "Choose a valid assistant provider.");
 	requireInput(
-		isProviderIdentifier(value.provider),
-		"Choose a valid assistant provider.",
-	);
-	requireInput(
-		text(value.modelId, 256) && value.modelId === value.modelId.trim() && !/[\u0000-\u001f\u007f-\u009f\ud800-\udfff]/u.test(value.modelId),
+		text(value.modelId, 256) &&
+			value.modelId === value.modelId.trim() &&
+			!/[\u0000-\u001f\u007f-\u009f\ud800-\udfff]/u.test(value.modelId),
 		"Choose a valid assistant model.",
 	);
 	const indexes = new Set(dataset.schema.map((column) => column.index));

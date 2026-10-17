@@ -608,7 +608,10 @@ test(
 		const { state, projectId, dataset, conversation, input } = await fixture(context);
 		let turn = 0;
 		const pi = await createFauxConversationDriver(state.root);
-		context.after(async () => { await pi.driver.close(); await pi.providers.close(); });
+		context.after(async () => {
+			await pi.driver.close();
+			await pi.providers.close();
+		});
 		const service = new ConversationService(state.store, {
 			...pi.driver,
 			async chat(scope, onEvent) {
@@ -656,7 +659,10 @@ test(
 	async (context) => {
 		const { state, projectId, dataset, conversation, input } = await fixture(context);
 		const pi = await createFauxConversationDriver(state.root);
-		context.after(async () => { await pi.driver.close(); await pi.providers.close(); });
+		context.after(async () => {
+			await pi.driver.close();
+			await pi.providers.close();
+		});
 		const service = new ConversationService(state.store, {
 			...pi.driver,
 			async chat(scope, onEvent, signal) {

@@ -27,7 +27,12 @@ import type {
 	ConversationEvent,
 	RenameProposal,
 } from "../../src/conversation-contracts.ts";
-import type { ProviderCatalog, ProviderModel, SessionModelSelection, SessionModelState } from "../../src/provider-contracts.ts";
+import type {
+	ProviderCatalog,
+	ProviderModel,
+	SessionModelSelection,
+	SessionModelState,
+} from "../../src/provider-contracts.ts";
 import type { TransformRecord } from "../../src/transform-contracts.ts";
 
 const date = "2026-09-24T00:00:00.000Z";
@@ -94,9 +99,17 @@ function frozen(value = dataset()): AssistantContext {
 }
 function availableModel(overrides: Partial<ProviderModel> = {}): ProviderModel {
 	return {
-		provider: "test", id: "model", name: "Model", contextWindow: 32000, maxTokens: 4096,
-		input: ["text", "image"], reasoning: true, thinkingLevels: ["off", "low", "high"],
-		cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 }, billing: "api", virtual: false,
+		provider: "test",
+		id: "model",
+		name: "Model",
+		contextWindow: 32000,
+		maxTokens: 4096,
+		input: ["text", "image"],
+		reasoning: true,
+		thinkingLevels: ["off", "low", "high"],
+		cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
+		billing: "api",
+		virtual: false,
 		...overrides,
 	};
 }
@@ -349,19 +362,28 @@ function setup(
 					models: available,
 					guidance: "Configuration checked by Pi; authentication is not independently verified.",
 					providers: [...new Set(available.map((item) => item.provider))].map((id) => ({
-						id, name: id, auth: { oauth: null, apiKey: { label: `Enter ${id} key`, interactive: true } },
-						state: "connected", configured: true, authType: "api_key", storedAuthType: "api_key",
-						source: "stored", modelCount: available.filter((item) => item.provider === id).length, message: "Configured",
+						id,
+						name: id,
+						auth: { oauth: null, apiKey: { label: `Enter ${id} key`, interactive: true } },
+						state: "connected",
+						configured: true,
+						authType: "api_key",
+						storedAuthType: "api_key",
+						source: "stored",
+						modelCount: available.filter((item) => item.provider === id).length,
+						message: "Configured",
 					})),
 				};
 				return catalog as T;
 			}
 			if (path.endsWith("/model")) {
 				const id = path.match(/\/conversations\/([^/]+)\/model$/)?.[1];
-				let state = id ? sessionModels.get(id) ?? serverConversation.modelState : draftState;
+				let state = id ? (sessionModels.get(id) ?? serverConversation.modelState) : draftState;
 				if (init.method === "PUT") {
 					const selection = JSON.parse(String(init.body)) as SessionModelSelection;
-					const model = available.find((item) => item.provider === selection.provider && item.id === selection.modelId);
+					const model = available.find(
+						(item) => item.provider === selection.provider && item.id === selection.modelId,
+					);
 					assert.ok(model, "selected model must be available");
 					state = { model, thinkingLevel: selection.thinkingLevel, routedModel: null };
 					if (id) sessionModels.set(id, state);
@@ -472,26 +494,32 @@ function setup(
 	async function chooseModel(name: string): Promise<void> {
 		element<HTMLButtonElement>("model").click();
 		await settle();
-		const choice = [...document.querySelectorAll<HTMLInputElement>('input[type="radio"]')]
-			.find((item) => item.getAttribute("aria-label")?.startsWith(`${name} — `));
+		const choice = [...document.querySelectorAll<HTMLInputElement>('input[type="radio"]')].find((item) =>
+			item.getAttribute("aria-label")?.startsWith(`${name} — `),
+		);
 		assert.ok(choice, `available model ${name}`);
 		choice.click();
 	}
 	function applyModel(): void {
-		const apply = [...document.querySelectorAll<HTMLButtonElement>("button")].find((item) => item.textContent === "Use model");
+		const apply = [...document.querySelectorAll<HTMLButtonElement>("button")].find(
+			(item) => item.textContent === "Use model",
+		);
 		assert.ok(apply, "model selection submit");
 		apply.click();
 	}
-	function closeProviders(): void {
-		const close = [...document.querySelectorAll<HTMLButtonElement>('dialog button')].find((item) => item.textContent === "Done" || item.textContent === "Close");
+	async function closeProviders(): Promise<void> {
+		const close = [...document.querySelectorAll<HTMLButtonElement>("dialog button")].find(
+			(item) => item.textContent === "Done" || item.textContent === "Close",
+		);
 		assert.ok(close, "provider dialog close");
 		close.click();
+		await settle();
 	}
 	async function selectModel(name: string): Promise<void> {
 		await chooseModel(name);
 		applyModel();
 		await settle();
-		closeProviders();
+		await closeProviders();
 	}
 	function complete(text = "Answer", index = streams.length - 1) {
 		const value = structuredClone(serverConversation);
@@ -634,7 +662,12 @@ test("no optional context is sent by default and incremental text stays safe and
 });
 
 test("removal and changing provider revoke file consent", async (t) => {
-	const ui = setup(t, { models: [availableModel(), availableModel({ provider: "future-provider", id: "new-model", name: "Future model" })] });
+	const ui = setup(t, {
+		models: [
+			availableModel(),
+			availableModel({ provider: "future-provider", id: "new-model", name: "Future model" }),
+		],
+	});
 	ui.controller.update(uiContext());
 	await settle();
 	ui.choose([ui.textFile("one.txt", "one"), ui.textFile("two.txt", "two")]);
@@ -807,8 +840,12 @@ test("streaming locks session switching and late events cannot alter the next da
 	await settle();
 	ui.element<HTMLButtonElement>("new").click();
 	ui.change("message", "Question");
+	assert.equal(ui.element<HTMLButtonElement>("send").disabled, true);
+	await settle();
+	assert.equal(ui.element<HTMLButtonElement>("send").disabled, false);
 	ui.submit();
 	await settle();
+	assert.equal(ui.streams.length, 1);
 	assert.ok(
 		[...ui.container.querySelectorAll<HTMLButtonElement>(".chat-session-list button")].every(
 			(button) => button.disabled,
@@ -863,6 +900,39 @@ test("metadata, create, streaming and Stop failures remain visible and controls 
 	assert.match(failure.element("feedback").textContent ?? "", /Create failed/);
 	assert.equal(failure.element<HTMLTextAreaElement>("message").value, "Keep draft");
 	assert.equal(failure.element<HTMLButtonElement>("send").disabled, false);
+});
+
+test("confirmed cancellation releases the composer before the stream promise settles", async (t) => {
+	const cancelled = saved();
+	cancelled.state = "failed";
+	cancelled.error = "Assistant response was cancelled. You can send another message.";
+	cancelled.messages = [
+		{
+			id: "message-a",
+			role: "user",
+			text: "Question",
+			createdAt: date,
+			state: "cancelled",
+		},
+	];
+	const ui = setup(t, {
+		respond(_path, init) {
+			if (init.method === "DELETE") return structuredClone(cancelled);
+		},
+	});
+	ui.controller.update(uiContext());
+	await settle();
+	ui.change("message", "Question");
+	ui.submit();
+	await settle();
+	assert.equal(ui.streams.length, 1);
+	ui.element<HTMLButtonElement>("stop").click();
+	await settle();
+	assert.equal(ui.element<HTMLTextAreaElement>("message").disabled, false);
+	assert.equal(ui.element<HTMLButtonElement>("stop").hidden, true);
+	assert.match(ui.element("feedback").textContent ?? "", /Assistant response was cancelled/);
+	ui.streams[0]!.completion.resolve(cancelled);
+	await settle();
 });
 
 test("result references are explicit and limited to eight", async (t) => {
@@ -1784,9 +1854,14 @@ test("mode and reasoning persist with server enforcement and recover from errors
 	reasoning.value = "high";
 	reasoning.dispatchEvent(new ui.browser.Event("change") as unknown as Event);
 	await settle();
-	assert.deepEqual(JSON.parse(String(ui.requests.filter(({ init }) => init.method === "PATCH").at(-1)!.init.body)), { mode: "plan" });
+	assert.deepEqual(JSON.parse(String(ui.requests.filter(({ init }) => init.method === "PATCH").at(-1)!.init.body)), {
+		mode: "plan",
+	});
 	assert.deepEqual(JSON.parse(String(ui.requests.filter(({ init }) => init.method === "PUT").at(-1)!.init.body)), {
-		provider: "test", modelId: "model", thinkingLevel: "high", persist: false,
+		provider: "test",
+		modelId: "model",
+		thinkingLevel: "high",
+		persist: false,
 	});
 	fail = true;
 	mode.value = "execute";
@@ -1900,7 +1975,12 @@ test("composer model selection retains one control and revokes attachment consen
 });
 
 test("model changes await the real session endpoint and retain current state after rejection", async (t) => {
-	const next = availableModel({ provider: "future-pi-provider", id: "future-model", name: "Future model", thinkingLevels: ["off", "xhigh"] });
+	const next = availableModel({
+		provider: "future-pi-provider",
+		id: "future-model",
+		name: "Future model",
+		thinkingLevels: ["off", "xhigh"],
+	});
 	const pending = deferred<SessionModelState>();
 	const ui = setup(t, {
 		models: [availableModel(), next],
@@ -1915,11 +1995,17 @@ test("model changes await the real session endpoint and retain current state aft
 	await ui.chooseModel("Future model");
 	const thinking = ui.document.querySelector<HTMLSelectElement>('select[aria-label="Thinking level"]');
 	assert.ok(thinking);
-	assert.deepEqual([...thinking.options].map((item) => item.value), ["off", "xhigh"]);
+	assert.deepEqual(
+		[...thinking.options].map((item) => item.value),
+		["off", "xhigh"],
+	);
 	ui.applyModel();
 	await settle();
 	assert.deepEqual(JSON.parse(String(ui.requests.find(({ init }) => init.method === "PUT")!.init.body)), {
-		provider: "future-pi-provider", modelId: "future-model", thinkingLevel: "off", persist: false,
+		provider: "future-pi-provider",
+		modelId: "future-model",
+		thinkingLevel: "off",
+		persist: false,
 	});
 	assert.equal(ui.element("model").textContent, "Model");
 	assert.equal(ui.element<HTMLButtonElement>("send").disabled, true);
@@ -1932,14 +2018,42 @@ test("model changes await the real session endpoint and retain current state aft
 	assert.doesNotMatch(ui.document.body.textContent ?? "", /Model unavailable/);
 	assert.equal(ui.element<HTMLButtonElement>("send").disabled, true);
 	assert.equal(ui.element<HTMLTextAreaElement>("message").value, "Unsent draft");
-	assert.equal(ui.requests.some(({ init }) => init.method === "POST"), false);
+	assert.equal(
+		ui.requests.some(({ init }) => init.method === "POST"),
+		false,
+	);
 });
 
 test("saved session hydrates authoritative current model and displays Auto physical dispatch", async (t) => {
 	const previous = saved();
-	const auto = availableModel({ provider: "router", id: "auto", name: "Auto", virtual: true, billing: "virtual", thinkingLevels: ["low", "high"] });
-	const state: SessionModelState = { model: auto, thinkingLevel: "high", routedModel: { provider: "future-provider", id: "actual-model", name: "Actual physical model", thinkingLevel: "high" } };
-	previous.messages = [{ id: "answer", role: "assistant", text: "Saved answer", state: "complete", createdAt: date, model: state.routedModel }];
+	const auto = availableModel({
+		provider: "router",
+		id: "auto",
+		name: "Auto — Pi chooses",
+		virtual: true,
+		billing: "virtual",
+		thinkingLevels: ["low", "high"],
+	});
+	const state: SessionModelState = {
+		model: auto,
+		thinkingLevel: "high",
+		routedModel: {
+			provider: "future-provider",
+			id: "actual-model",
+			name: "Actual physical model",
+			thinkingLevel: "high",
+		},
+	};
+	previous.messages = [
+		{
+			id: "answer",
+			role: "assistant",
+			text: "Saved answer",
+			state: "complete",
+			createdAt: date,
+			model: state.routedModel,
+		},
+	];
 	const ui = setup(t, {
 		sessions: [previous],
 		models: [availableModel(), auto],
@@ -1951,11 +2065,20 @@ test("saved session hydrates authoritative current model and displays Auto physi
 	await settle();
 	assert.equal(ui.element("model").textContent, "Auto — Pi chooses → Actual physical model");
 	assert.equal(ui.element<HTMLSelectElement>("reasoning").value, "high");
-	assert.match(ui.container.querySelector(".chat-message-header")?.textContent ?? "", /Actual physical model.*future-provider \/ actual-model/);
-	assert.match(ui.container.querySelector(".chat-consent-summary")?.textContent ?? "", /Auto.*any available configured provider/);
+	assert.match(
+		ui.container.querySelector(".chat-message-header")?.textContent ?? "",
+		/Actual physical model.*future-provider \/ actual-model/,
+	);
+	assert.match(
+		ui.container.querySelector(".chat-consent-summary")?.textContent ?? "",
+		/Auto.*any available configured provider/,
+	);
 	assert.match(ui.element("context").textContent ?? "", /Original disclosure provider: test \/ model/);
 	assert.equal(ui.streams.length, 0);
-	assert.equal(ui.requests.some(({ init }) => init.method), false);
+	assert.equal(
+		ui.requests.some(({ init }) => init.method),
+		false,
+	);
 });
 
 test("provider entry points work without a dataset and do not create a chat", async (t) => {
@@ -1964,17 +2087,23 @@ test("provider entry points work without a dataset and do not create a chat", as
 	ui.document.dispatchEvent(new ui.browser.CustomEvent("workbench:open-settings") as unknown as Event);
 	await settle();
 	assert.ok(ui.document.querySelector('dialog[open][aria-modal="true"]'));
-	assert.equal(ui.requests.some(({ path }) => path === "/api/providers"), true);
-	ui.closeProviders();
+	assert.equal(
+		ui.requests.some(({ path }) => path === "/api/providers"),
+		true,
+	);
+	await ui.closeProviders();
 	ui.element<HTMLButtonElement>("provider").click();
 	await settle();
 	assert.ok(ui.document.querySelector('dialog[open][aria-modal="true"]'));
-	ui.closeProviders();
+	await ui.closeProviders();
 	ui.element<HTMLButtonElement>("model").click();
 	await settle();
 	assert.ok(ui.document.querySelector('input[aria-label="Search models"]'));
 	assert.equal(ui.streams.length, 0);
-	assert.equal(ui.requests.some(({ init }) => init.method), false);
+	assert.equal(
+		ui.requests.some(({ init }) => init.method),
+		false,
+	);
 	assert.equal(ui.document.querySelector("#conversation-api-key"), null);
 });
 
@@ -1982,23 +2111,37 @@ test("empty available catalog connection CTA opens Providers without sending con
 	const ui = setup(t, { models: [], draftModelState: { model: null, thinkingLevel: "off", routedModel: null } });
 	ui.controller.update(uiContext());
 	await settle();
-	const connect = [...ui.container.querySelectorAll<HTMLButtonElement>(".assistant-history button")].find((item) => item.textContent === "Connect a provider");
+	const connect = [...ui.container.querySelectorAll<HTMLButtonElement>(".assistant-history button")].find(
+		(item) => item.textContent === "Connect a provider",
+	);
 	assert.ok(connect);
 	connect.click();
 	await settle();
 	assert.ok(ui.document.querySelector('dialog[open][aria-modal="true"]'));
-	assert.equal(ui.requests.some(({ path }) => path === "/api/providers"), true);
+	assert.equal(
+		ui.requests.some(({ path }) => path === "/api/providers"),
+		true,
+	);
 	assert.equal(ui.streams.length, 0);
-	assert.equal(ui.requests.some(({ init }) => init.method), false);
+	assert.equal(
+		ui.requests.some(({ init }) => init.method),
+		false,
+	);
 });
 
 test("existing session selection commits only authoritative state and does not mutate frozen context", async (t) => {
-	const next = availableModel({ provider: "new-provider", id: "new-id", name: "New catalog model", thinkingLevels: ["low", "high"] });
+	const next = availableModel({
+		provider: "new-provider",
+		id: "new-id",
+		name: "New catalog model",
+		thinkingLevels: ["low", "high"],
+	});
 	const pending = deferred<SessionModelState>();
 	const previous = saved();
 	const original = structuredClone(previous.scope);
 	const ui = setup(t, {
-		sessions: [previous], models: [availableModel(), next],
+		sessions: [previous],
+		models: [availableModel(), next],
 		respond(path, init) {
 			if (path.endsWith("/conversations/chat-a/model") && init.method === "PUT") return pending.promise;
 		},
@@ -2007,7 +2150,9 @@ test("existing session selection commits only authoritative state and does not m
 	await settle();
 	const contextBefore = ui.element("context").textContent;
 	await ui.chooseModel("New catalog model");
-	const defaults = [...ui.document.querySelectorAll<HTMLLabelElement>("dialog label")].find((label) => label.textContent?.includes("Use as default for new sessions"))?.querySelector<HTMLInputElement>("input");
+	const defaults = [...ui.document.querySelectorAll<HTMLLabelElement>("dialog label")]
+		.find((label) => label.textContent?.includes("Use as default for new sessions"))
+		?.querySelector<HTMLInputElement>("input");
 	assert.ok(defaults);
 	assert.equal(defaults.checked, false);
 	defaults.click();
@@ -2025,16 +2170,23 @@ test("existing session selection commits only authoritative state and does not m
 	assert.equal(ui.element<HTMLSelectElement>("reasoning").value, "high");
 	assert.equal(ui.element("context").textContent, contextBefore);
 	assert.deepEqual(previous.scope, original);
-	assert.match(ui.container.querySelector(".chat-consent-summary")?.textContent ?? "", /Next Send: new-provider \/ new-id/);
+	assert.match(
+		ui.container.querySelector(".chat-consent-summary")?.textContent ?? "",
+		/Next Send: new-provider \/ new-id/,
+	);
 	assert.equal(ui.streams.length, 0);
-	assert.equal(ui.requests.some(({ init }) => init.method === "POST"), false);
+	assert.equal(
+		ui.requests.some(({ init }) => init.method === "POST"),
+		false,
+	);
 });
 
 test("failed current-model hydration blocks Send instead of trusting a stale saved selection", async (t) => {
 	const ui = setup(t, {
 		sessions: [saved()],
 		respond(path) {
-			if (path.endsWith("/conversations/chat-a/model")) return Promise.reject(new Error("Current model unavailable"));
+			if (path.endsWith("/conversations/chat-a/model"))
+				return Promise.reject(new Error("Current model unavailable"));
 		},
 	});
 	ui.controller.update(uiContext());
@@ -2051,7 +2203,9 @@ test("late model hydration cannot overwrite another dataset's authoritative sele
 	const pending = deferred<SessionModelState>();
 	const future = availableModel({ provider: "next-provider", id: "next-model", name: "Next model" });
 	const ui = setup(t, {
-		sessions: [saved()], models: [availableModel(), future], draftModelState: selectedModel(future),
+		sessions: [saved()],
+		models: [availableModel(), future],
+		draftModelState: selectedModel(future),
 		respond(path) {
 			if (path.endsWith("/conversations/chat-a/model")) return pending.promise;
 			if (path.includes("project-b") && path.endsWith("/conversations")) return [];
@@ -2065,7 +2219,10 @@ test("late model hydration cannot overwrite another dataset's authoritative sele
 	pending.resolve(selectedModel());
 	await settle();
 	assert.equal(ui.element("model").textContent, "Next model");
-	assert.match(ui.container.querySelector(".chat-consent-summary")?.textContent ?? "", /Next Send: next-provider \/ next-model/);
+	assert.match(
+		ui.container.querySelector(".chat-consent-summary")?.textContent ?? "",
+		/Next Send: next-provider \/ next-model/,
+	);
 	assert.equal(ui.streams.length, 0);
 });
 

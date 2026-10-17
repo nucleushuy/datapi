@@ -59,12 +59,16 @@ test(
 		await settled((await seed.profile(project.id, original.id)).id);
 		await seed.close();
 		async function startApplication() {
-			const pi = await createFauxConversationDriver(root, { chart: {
-				title: "Counts by group",
-				explanation: "Compare observed categories; counts will be computed locally, not inferred from profile statistics.",
-				evidenceRefs: ["column.0.distinctCount"], affectedColumns: [0],
-				spec: { ...defaultChartSpec(original.currentVersionId), x: 0 },
-			} });
+			const pi = await createFauxConversationDriver(root, {
+				chart: {
+					title: "Counts by group",
+					explanation:
+						"Compare observed categories; counts will be computed locally, not inferred from profile statistics.",
+					evidenceRefs: ["column.0.distinctCount"],
+					affectedColumns: [0],
+					spec: { ...defaultChartSpec(original.currentVersionId), x: 0 },
+				},
+			});
 			return startWorkbench({ dataDir: root, port: 0, conversationDriver: pi.driver, providers: pi.providers });
 		}
 		app = await startApplication();

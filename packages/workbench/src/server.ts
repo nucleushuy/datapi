@@ -61,7 +61,11 @@ function noBody(request: IncomingMessage): void {
 
 function routeIdentifier(value: string, provider = false): string {
 	let decoded: string;
-	try { decoded = decodeURIComponent(value); } catch { throw new WorkbenchError(400, "Invalid resource identifier."); }
+	try {
+		decoded = decodeURIComponent(value);
+	} catch {
+		throw new WorkbenchError(400, "Invalid resource identifier.");
+	}
 	if (provider ? !isProviderIdentifier(decoded) : !/^[a-zA-Z0-9_-]{1,128}$/u.test(decoded))
 		throw new WorkbenchError(400, "Invalid resource identifier.");
 	return decoded;
@@ -99,8 +103,12 @@ export async function startWorkbench(options: WorkbenchOptions): Promise<Workben
 	const store = new WorkbenchStore(options.dataDir);
 	await store.init();
 	let providers: ProviderService;
-	try { providers = options.providers ?? await ProviderService.create(options.dataDir); }
-	catch (error) { await store.close(); throw error; }
+	try {
+		providers = options.providers ?? (await ProviderService.create(options.dataDir));
+	} catch (error) {
+		await store.close();
+		throw error;
+	}
 	const conversationDriver = options.conversationDriver ?? new PiConversationDriver(providers);
 	const conversations = new ConversationService(store, conversationDriver);
 	const token = randomBytes(32).toString("hex");
@@ -175,7 +183,11 @@ export async function startWorkbench(options: WorkbenchOptions): Promise<Workben
 			}
 			if (parts.length === 4 && parts[3] === "auth" && method === "POST") {
 				const input = await readMetadata(request, 1024);
-				if (Object.keys(input).length !== 1 || !Object.hasOwn(input, "type") || (input.type !== "oauth" && input.type !== "api_key"))
+				if (
+					Object.keys(input).length !== 1 ||
+					!Object.hasOwn(input, "type") ||
+					(input.type !== "oauth" && input.type !== "api_key")
+				)
 					throw new WorkbenchError(400, "Choose a supported authentication type.");
 				json(response, 201, providers.startAuth(providerId, input.type));
 				return;
@@ -185,15 +197,29 @@ export async function startWorkbench(options: WorkbenchOptions): Promise<Workben
 			const operationId = routeIdentifier(parts[2]);
 			if (method === "GET" || method === "DELETE") {
 				noBody(request);
-				json(response, 200, method === "GET" ? providers.authOperation(operationId) : await providers.cancelAuth(operationId));
+				json(
+					response,
+					200,
+					method === "GET" ? providers.authOperation(operationId) : await providers.cancelAuth(operationId),
+				);
 				return;
 			}
 			if (method === "POST") {
 				const input = await readMetadata(request, 32 * 1024);
-				if (Object.keys(input).length !== 2 || !Object.hasOwn(input, "promptId") || !Object.hasOwn(input, "value") ||
-					typeof input.promptId !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/u.test(input.promptId) ||
-					typeof input.value !== "string" || Buffer.byteLength(input.value) > 16 * 1024 || input.value.includes("\0"))
-					throw new WorkbenchError(400, "Provide a valid prompt identifier and an authentication response up to 16 KiB.");
+				if (
+					Object.keys(input).length !== 2 ||
+					!Object.hasOwn(input, "promptId") ||
+					!Object.hasOwn(input, "value") ||
+					typeof input.promptId !== "string" ||
+					!/^[a-zA-Z0-9_-]{1,128}$/u.test(input.promptId) ||
+					typeof input.value !== "string" ||
+					Buffer.byteLength(input.value) > 16 * 1024 ||
+					input.value.includes("\0")
+				)
+					throw new WorkbenchError(
+						400,
+						"Provide a valid prompt identifier and an authentication response up to 16 KiB.",
+					);
 				providers.answerAuth(operationId, input.promptId, input.value);
 				json(response, 200, providers.authOperation(operationId));
 				return;
@@ -207,8 +233,15 @@ export async function startWorkbench(options: WorkbenchOptions): Promise<Workben
 		}
 		if (path === "/api/chat/model" && (method === "GET" || method === "PUT")) {
 			if (method === "GET") noBody(request);
-			json(response, 200, method === "GET" ? await conversationDriver.draftModelState() :
-				await conversationDriver.selectDraftModel(parseSessionModelSelection(await readMetadata(request, 4096))));
+			json(
+				response,
+				200,
+				method === "GET"
+					? await conversationDriver.draftModelState()
+					: await conversationDriver.selectDraftModel(
+							parseSessionModelSelection(await readMetadata(request, 4096)),
+						),
+			);
 			return;
 		}
 		if (path === "/api/projects") {
@@ -378,10 +411,25 @@ export async function startWorkbench(options: WorkbenchOptions): Promise<Workben
 						);
 						return;
 					}
-					if (conversationId && parts.length === 8 && parts[7] === "model" && (method === "GET" || method === "PUT")) {
+					if (
+						conversationId &&
+						parts.length === 8 &&
+						parts[7] === "model" &&
+						(method === "GET" || method === "PUT")
+					) {
 						if (method === "GET") noBody(request);
-						json(response, 200, method === "GET" ? await conversations.modelState(projectId, datasetId, conversationId) :
-							await conversations.selectModel(projectId, datasetId, conversationId, await readMetadata(request, 4096)));
+						json(
+							response,
+							200,
+							method === "GET"
+								? await conversations.modelState(projectId, datasetId, conversationId)
+								: await conversations.selectModel(
+										projectId,
+										datasetId,
+										conversationId,
+										await readMetadata(request, 4096),
+									),
+						);
 						return;
 					}
 					if (
@@ -621,9 +669,15 @@ export async function startWorkbench(options: WorkbenchOptions): Promise<Workben
 			});
 		});
 	} catch (error) {
-		await conversations.close();
-		await providers.close();
-		await store.close();
+		try {
+			await conversations.close();
+		} finally {
+			try {
+				await providers.close();
+			} finally {
+				await store.close();
+			}
+		}
 		throw error;
 	}
 	const address = server.address();
@@ -639,10 +693,16 @@ export async function startWorkbench(options: WorkbenchOptions): Promise<Workben
 					server.close((error) => (error ? reject(error) : resolve()));
 				});
 				server.closeAllConnections();
-				await conversations.close();
-				await providers.close();
-				await store.close();
-				await stopped;
+				try {
+					await conversations.close();
+				} finally {
+					try {
+						await providers.close();
+					} finally {
+						await store.close();
+						await stopped;
+					}
+				}
 			})();
 			return closing;
 		},

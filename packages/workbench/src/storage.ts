@@ -85,26 +85,72 @@ export class WorkbenchError extends Error {
 function validModelIdentity(value: unknown): boolean {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
 	const model = value as Record<string, unknown>;
-	return ["provider", "id", "name"].every((key) => typeof model[key] === "string" && model[key].length > 0 && model[key].length <= 512 && !/[\u0000-\u001f\u007f]/u.test(model[key]));
+	return ["provider", "id", "name"].every(
+		(key) =>
+			typeof model[key] === "string" &&
+			model[key].length > 0 &&
+			model[key].length <= 512 &&
+			!/[\u0000-\u001f\u007f]/u.test(model[key]),
+	);
 }
 
 function validRoutedModel(value: SessionModelState["routedModel"]): boolean {
-	return value === null || (validModelIdentity(value) && Object.keys(value).every((key) => ["provider", "id", "name", "thinkingLevel"].includes(key)) &&
-		(value.thinkingLevel === undefined || CONVERSATION_REASONING_EFFORTS.includes(value.thinkingLevel)));
+	return (
+		value === null ||
+		(validModelIdentity(value) &&
+			Object.keys(value).every((key) => ["provider", "id", "name", "thinkingLevel"].includes(key)) &&
+			(value.thinkingLevel === undefined || CONVERSATION_REASONING_EFFORTS.includes(value.thinkingLevel)))
+	);
 }
 
 function validModelState(value: SessionModelState): boolean {
-	if (!value || typeof value !== "object" || Object.keys(value).length !== 3 ||
-		!CONVERSATION_REASONING_EFFORTS.includes(value.thinkingLevel) || !validRoutedModel(value.routedModel)) return false;
+	if (
+		!value ||
+		typeof value !== "object" ||
+		Object.keys(value).length !== 3 ||
+		!CONVERSATION_REASONING_EFFORTS.includes(value.thinkingLevel) ||
+		!validRoutedModel(value.routedModel)
+	)
+		return false;
 	const model = value.model;
-	return model === null || (validModelIdentity(model) &&
-		Object.keys(model).length === 11 && Object.keys(model).every((key) => ["provider", "id", "name", "contextWindow", "maxTokens", "input", "reasoning", "thinkingLevels", "cost", "billing", "virtual"].includes(key)) &&
-		Number.isFinite(model.contextWindow) && model.contextWindow > 0 && Number.isFinite(model.maxTokens) && model.maxTokens > 0 &&
-		Array.isArray(model.input) && model.input.every((kind) => kind === "text" || kind === "image") && typeof model.reasoning === "boolean" &&
-		Array.isArray(model.thinkingLevels) && model.thinkingLevels.every((level) => CONVERSATION_REASONING_EFFORTS.includes(level)) &&
-		["subscription", "api", "virtual"].includes(model.billing) && typeof model.virtual === "boolean" &&
-		model.cost && Object.keys(model.cost).length === 4 && ["input", "output", "cacheRead", "cacheWrite"].every((key) =>
-			Number.isFinite(model.cost[key as keyof typeof model.cost]) && model.cost[key as keyof typeof model.cost] >= 0));
+	return (
+		model === null ||
+		(validModelIdentity(model) &&
+			Object.keys(model).length === 11 &&
+			Object.keys(model).every((key) =>
+				[
+					"provider",
+					"id",
+					"name",
+					"contextWindow",
+					"maxTokens",
+					"input",
+					"reasoning",
+					"thinkingLevels",
+					"cost",
+					"billing",
+					"virtual",
+				].includes(key),
+			) &&
+			Number.isFinite(model.contextWindow) &&
+			model.contextWindow >= 0 &&
+			Number.isFinite(model.maxTokens) &&
+			model.maxTokens >= 0 &&
+			Array.isArray(model.input) &&
+			model.input.every((kind) => kind === "text" || kind === "image") &&
+			typeof model.reasoning === "boolean" &&
+			Array.isArray(model.thinkingLevels) &&
+			model.thinkingLevels.every((level) => CONVERSATION_REASONING_EFFORTS.includes(level)) &&
+			["subscription", "api", "virtual"].includes(model.billing) &&
+			typeof model.virtual === "boolean" &&
+			model.cost &&
+			Object.keys(model.cost).length === 4 &&
+			["input", "output", "cacheRead", "cacheWrite"].every(
+				(key) =>
+					Number.isFinite(model.cost[key as keyof typeof model.cost]) &&
+					model.cost[key as keyof typeof model.cost] >= 0,
+			))
+	);
 }
 
 function validateConversationMessage(value: Conversation["messages"][number]): boolean {
@@ -1154,11 +1200,16 @@ export class WorkbenchStore {
 			(previous.title !== conversation.title ||
 				previous.archivedAt !== conversation.archivedAt ||
 				(previous.mode ?? "execute") !== (conversation.mode ?? "execute") ||
-				(conversation.state !== "ready" && (previous.reasoningEffort ?? "off") !== (conversation.reasoningEffort ?? "off")))
+				(conversation.state !== "ready" &&
+					(previous.reasoningEffort ?? "off") !== (conversation.reasoningEffort ?? "off")))
 		)
 			throw new WorkbenchError(409, "Wait for the active conversation response before changing session settings.");
-		if (previous?.state === "running" && conversation.state !== "ready" &&
-			(previous.sessionFile !== conversation.sessionFile || !isDeepStrictEqual(previous.modelState, conversation.modelState)))
+		if (
+			previous?.state === "running" &&
+			conversation.state !== "ready" &&
+			(previous.sessionFile !== conversation.sessionFile ||
+				!isDeepStrictEqual(previous.modelState, conversation.modelState))
+		)
 			throw new WorkbenchError(409, "Only a successful response can publish a changed Pi session.");
 		if (
 			(conversation.state === "running" && previous?.state === "running") ||

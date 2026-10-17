@@ -11,7 +11,11 @@ import {
 	type AssistantContext,
 	type AssistantSelection,
 } from "../src/assistant-contracts.ts";
-import { parseAssistantOutput, parseAssistantSelection } from "../src/assistant-validation.ts";
+import {
+	parseAssistantOutput,
+	parseAssistantSelection,
+	parseSessionModelSelection,
+} from "../src/assistant-validation.ts";
 import type { ChartRecord } from "../src/chart-contracts.ts";
 import { defaultChartSpec } from "../src/chart-spec.ts";
 import type { Dataset, DatasetColumn, Project } from "../src/contracts.ts";
@@ -116,6 +120,27 @@ function fixture(columns = schema, rowCount = 4) {
 	};
 	return { dataset, profile, selection };
 }
+
+test("model selection accepts future Pi identifiers and extended thinking without a provider allowlist", () => {
+	const { dataset, selection } = fixture();
+	const provider = "future.provider/team";
+	assert.equal(parseAssistantSelection({ ...selection, provider }, dataset).provider, provider);
+	for (const thinkingLevel of ["xhigh", "max"] as const) {
+		const value = { provider, modelId: "family/model:latest", thinkingLevel, persist: false };
+		assert.deepEqual(parseSessionModelSelection(value), value);
+	}
+	const valid = { provider, modelId: "model", thinkingLevel: "off", persist: false };
+	for (const invalid of [
+		{ ...valid, provider: "bad\nprovider" },
+		{ ...valid, provider: "p".repeat(257) },
+		{ ...valid, modelId: "\0" },
+		{ ...valid, thinkingLevel: "extreme" },
+		{ ...valid, persist: "false" },
+		{ ...valid, headers: { Authorization: "private" } },
+		{ provider, modelId: "model", thinkingLevel: "off" },
+	])
+		assert.throws(() => parseSessionModelSelection(invalid), WorkbenchError);
+});
 
 function contextFor(): AssistantContext {
 	const { dataset, profile, selection } = fixture();
