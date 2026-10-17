@@ -6,9 +6,10 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import type { Bootstrap, Dataset, ImportJob } from "../src/contracts.ts";
-import type { Conversation, ConversationDriver, RenameProposal } from "../src/conversation-contracts.ts";
+import type { Conversation, RenameProposal } from "../src/conversation-contracts.ts";
 import { startWorkbench, type WorkbenchApplication } from "../src/server.ts";
 import { WorkbenchStore } from "../src/storage.ts";
+import { createFauxConversationDriver } from "./fixtures/conversation-faux-driver.ts";
 
 test(
 	"rename HTTP requires scoped exact-preview approval and retains decisions across restart",
@@ -49,37 +50,11 @@ test(
 		const original = await seed.getDataset(project.id, imported.datasetId);
 		assert.equal((await settled((await seed.profile(project.id, original.id)).id)).state, "completed");
 		await seed.close();
-		const driver: ConversationDriver & { authorizedProviders(): Promise<readonly string[]> } = {
-			async chat(input, onEvent) {
-				assert.equal(input.renameScope?.datasetVersionId, original.currentVersionId);
-				onEvent({
-					type: "rename_proposal",
-					toolCallId: randomUUID(),
-					datasetVersionId: original.currentVersionId,
-					column: 0,
-					name: "cohort",
-				});
-				onEvent({ type: "text", delta: "Review the rename proposal locally." });
-				return {
-					text: "Review the rename proposal locally.",
-					sessionFile: join(root, "fixture.jsonl"),
-					usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 },
-				};
-			},
-			async authorizedProviders() {
-				return ["openai"];
-			},
-			async setCredential() {},
-			async deleteCredential() {},
-			async close() {},
-		};
-		const catalog = {
-			async models() {
-				return { models: [], guidance: "No network" };
-			},
-			async close() {},
-		};
-		app = await startWorkbench({ dataDir: root, port: 0, conversationDriver: driver, modelCatalog: catalog });
+		async function startApplication() {
+			const pi = await createFauxConversationDriver(root, { rename: { column: 0, name: "cohort" } });
+			return startWorkbench({ dataDir: root, port: 0, conversationDriver: pi.driver, providers: pi.providers });
+		}
+		app = await startApplication();
 		let token = ((await (await fetch(`${app.url}/api/bootstrap`)).json()) as Bootstrap).token;
 		const base = `/api/projects/${project.id}/datasets/${original.id}`;
 		async function request(path: string, method = "GET", body?: unknown): Promise<Response> {
@@ -150,7 +125,7 @@ test(
 		const reviewed = (await (await request(`${nextRoute}/preview`, "POST")).json()) as RenameProposal;
 		assert.ok(reviewed.preview);
 		await app.close();
-		app = await startWorkbench({ dataDir: root, port: 0, conversationDriver: driver, modelCatalog: catalog });
+		app = await startApplication();
 		token = ((await (await fetch(`${app.url}/api/bootstrap`)).json()) as Bootstrap).token;
 		const appliedResponse = await request(`${nextRoute}/apply`, "POST", {
 			previewId: reviewed.preview.id,

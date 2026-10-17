@@ -1,16 +1,16 @@
 # Data-science workbench implementation plan
 
-## Current checkpoint — 2026-09-24
+## Current checkpoint — 2026-10-16
 
 The stage descriptions below are historical design/checkpoint records, not an up-to-date feature inventory. The [root README](../README.md) is the current project introduction and usage guide.
 
-- Right-side Pi chat streams text, persists frozen context, supports follow-ups/cancellation, and restores sessions after reload/restart. Its tools are `propose_column_rename` and `propose_chart`; neither executes, previews or approves operations. Each turn forks the last committed SDK snapshot in a bounded subprocess; failed/cancelled/uncommitted turns cannot alter later provider history.
-- Frozen context includes disclosed dataset/profile/columns/filters/chart metadata, optional explicitly approved UTF-8 text files with byte lengths and SHA-256 hashes, and selected safe metadata/counts from scoped transformation records. Files are never executed; dataset rows are not attached automatically. Existing absent attachment fields and saved context hashes remain unchanged.
-- Chat uses explicit literal API keys persisted in the workbench's own Pi credential file, not the memory-only credentials of the historical suggestion implementation. No automatic CLI login reuse, OAuth, ambient credential templates, or command execution is enabled.
+- Chat-first Pi workspace: compact rail, searchable sessions, persistent streaming history, sanitized Markdown/math/code, opt-in screenshots, session rename/duplicate/archive/export, and explicit Plan/Execute controls. Data tools remain available in their own destination. The Node host retains Pi AgentSessions sharing one profile ModelRuntime; checkpointed session-manager snapshots prevent failed, cancelled, or uncommitted turns from altering published history. Analytical work remains in bounded worker processes.
+- Frozen context includes disclosed dataset/profile/columns/filters/chart metadata, explicitly approved UTF-8 files and PNG/JPEG/WebP screenshots with byte lengths/hashes, and safe scoped transformation metadata. Files are never executed and dataset rows are not attached automatically. Exports omit attachment contents and image bytes.
+- Provider discovery, supported OAuth/API-key flows, ambient credential status, and available models come from the installed Pi runtime. Pi persists credentials in the profile's `<data-dir>/pi/auth.json`; the browser receives only safe status and model metadata. Account replacement preserves the old credential on cancellation or failure. Model choices update real sessions, defaults require explicit opt-in, and Auto is a Pi virtual model whose physical dispatch is reported from assistant messages. This remains a single-user local application, not a shared multi-user credential store.
 - Rename proposals validate the frozen version and disclosed column against the real schema. Local Preview shows SQL and counts without changing the dataset; a separate exact-preview approval publishes an immutable version. Rejection, stale/expired/altered previews and generic-endpoint bypasses cannot apply. Proposal decisions, output identity and transform audit commit durably and support existing undo/redo. Limits: eight proposals per successful turn, 100 retained per conversation, plus existing transformation limits.
 - Chart proposals reuse complete chart/evidence validation and the existing local chart engine. Cards show frozen metrics, confidence and inference/hypothesis caveats, JSON, local SVG and generated Python. Preview receipts bind input/spec hashes and history revision for 30 minutes; separate exact-preview approval atomically saves an ordinary chart and its audit without changing the dataset. Reload requires a new rendered preview before approval. Chart and rename tools share the eight-per-turn/100-per-conversation limits. Undeclared implicit sample fields are rejected.
 - Chart verification includes SDK/subprocess/HTTP and browser contracts for typed proposals, hidden fields/evidence, mixed atomic batches, exact preview/save/reject, failed-turn isolation, expiry/tampering, rollback/restart, retained limits and stale async responses. Real browser smoke exercised a faceted failure-rate line chart, local evidence/rendering, saved-list refresh, keyboard rejection, restart, busy-worker retry, reload approval blocking, and 1440px/390px layouts. No paid provider calls were made; hosted inference remains unverified. Earlier rename verification covered undo/redo and exact output-version publication.
-- Final chart-proposal validation: 146 tests passed across the 15 focused files listed in the README; the final chart HTTP test also passed independently. `npm run check` passed with no fixes or diagnostics. Temporary chart smoke runtime/data were removed; the normal local workbench was restarted with the implementation.
+- Historical chart-proposal validation: 146 tests passed across the 15 focused files then listed in the README; `npm run check` passed at that checkpoint. Current UI verification is reported separately; this historical result is not a claim about the present source catalog.
 - Approval/execution and chart preview results remain local, not automatic provider messages. Only column renames and supported data charts are available through the Pi tool loop; broader transformation tools and the full conversational-agent plan below are not complete. Arbitrary generated code and model training remain disabled.
 
 ## Historical stage plan
@@ -70,17 +70,17 @@ This historical checkpoint was not a green baseline. Subsequent Prompt 3–5 res
 - Browser downloads completed for PNG (293,051 bytes), SVG (36,100 bytes), standalone HTML (92,353 bytes) and JSON (47,615 bytes). Standalone HTML rendered with no scripts or remote resources. All eight exported Python chart scripts exited successfully with matplotlib 3.10.3; the Agg backend emitted expected noninteractive `show` warnings. This was external export verification, not application Python execution.
 - No AI-provider calls, model training, arbitrary transformations or application Python execution were enabled. Prompt 5 is complete; stop before Prompt 6 pending approval.
 
-### Prompt 6 checkpoint (history)
+### Prompt 6 checkpoint (historical; superseded by the current Pi-native provider/session checkpoint above)
 
 - Public Pi SDK integration lives in `assistant-driver.ts` and `assistant-sdk-worker.ts`, launched through the existing tsx/root source-alias workflow. No Pi core changes. Fresh in-memory sessions use no tools or ambient resources; the public session system prompt is compared with the exact approved text before generation. The virtual working directory is fixed and nonsensitive.
 - `assistant-context.ts` explicitly selects metadata/statistics; `assistant-validation.ts` rejects unknown fields, unsupported charts, fabricated evidence IDs, undisclosed columns and model-owned lifecycle state. Rows, samples, storage paths and previous turns are never attached. Evidence linkage does not verify an interpretation; the UI labels inference/hypothesis status.
 - `assistant-service.ts` manages bounded, expiring, single-use approvals, one active generation, progress counts, usage, cancellation and safe failures. Metadata schema 4 persists scoped runs and recovers interrupted work. Applying/reverting a suggestion atomically changes only its owned chart configuration, protecting edited charts and preserving original data.
-- Provider keys are explicit literal values held only in server memory. No ambient Pi/environment credentials, OAuth, custom endpoints or credential command expansion. Offline discovery exposed 450 models across eight supported providers with zero configured credentials in the actual subprocess smoke.
+- Historical provider boundary: provider keys were explicit literal values held only in server memory; ambient Pi/environment credentials, OAuth and custom endpoints were intentionally disabled in that earlier stage. The current implementation instead uses the installed Pi runtime's Pi-managed profile credentials and supported OAuth/API-key/ambient capability metadata; no paid provider inference was performed in this historical smoke.
 - Actual browser smoke exercised three-field disclosure without private cells, approval, completed suggestions, local chart preview/save/open/revert, malformed-output rejection, cancellation, and a 390px viewport without horizontal page overflow. The browser used a clearly identified offline test driver; actual SDK generation is exercised separately with Pi's deterministic faux provider. No paid provider inference was performed.
 - Final validation passed 64 assistant tests across six files and 73 affected existing regression tests across eight files (137 total), plus `npm run check` with Node/DOM typechecking and browser bundling. The refreshed application listed all eight supported providers as unconfigured and disabled preparation without credentials. Temporary smoke data was separate from the normal application store.
 - Limits and usage are in the root README. SDK process separation and a JavaScript heap limit are not a sandbox. Generated code remains inspect-only. Stop before Prompt 7 pending approval.
 
-### Prompt 7 current checkpoint
+### Prompt 7 current checkpoint (historical; the retained-session implementation now described in the current checkpoint above supersedes the independent-session note below)
 
 - `transform-contracts.ts`, `transform-spec.ts` and `transform-engine.ts` define fixed, validated operations: rename/cast/drop, row filters, missing-value handling, deduplication, category mapping, datetime extraction, scaling, encoding and structured derived expressions. Application-generated DuckDB SQL is inspectable; arbitrary SQL, Python, JavaScript and model-generated code are not executable.
 - **Data → Transform → Preview full-dataset impact** computes the complete output artifact and exact affected-row, row-count, schema and NULL-count impact. At most 20 first input/output rows are illustrative samples, not an aligned diff. Numeric conversions/arithmetic disclose double-precision approximation; unchanged source text remains exact. Missing-value policy distinguishes SQL NULL from empty string.
@@ -118,28 +118,30 @@ Existing browser artifacts include `packages/coding-agent/src/core/export-html` 
 
 Public session operations include `subscribe`, `prompt`, `abort`, `waitForIdle`, and `dispose`. Use settled/idle semantics for turn completion rather than assuming every `agent_end` means all work finished. `defineTool` plus TypeBox parameters provides typed custom tools with cancellation, progress updates, and structured result details.
 
-Implemented Prompt 6 assistant configuration, still current after Prompt 7 (narrower than the original later-tool proposal; conversational redesign pending review):
+### Prompt 6 assistant configuration (historical checkpoint)
+
+The following records the earlier Prompt 6 implementation. It is superseded for provider credentials and conversation lifecycle by the current checkpoint at the top of this document: the workbench now uses Pi-managed profile credentials, a shared profile `ModelRuntime`, and retained `AgentSession` instances. The context, tool, and privacy constraints remain applicable.
 
 - Explicit empty tool allowlist. No read/bash/edit/write defaults or application tool execution.
 - Fixed resource loader and in-memory settings. No ambient extensions, skills, command expansion or context files.
-- Application-owned SQLite run history; each inference uses a fresh `SessionManager.inMemory` and no previous messages. This prevents previously approved metadata from being retransmitted implicitly.
-- `ModelRuntime` receives an explicit in-memory credential store, no models.json and no catalog-network refresh. Browser selection uses validated built-in provider/model IDs. Keys are server-memory only.
 - Only the exact approved system/user metadata envelope goes to the model. The SDK supplies provider protocol/authentication wrappers; those are not represented as dataset context.
 - Chart previews and validated transformation proposals use existing local analytical operations after validation; results are not sent back to a provider. Transformation acceptance only fills review controls, with a separate local preview and approval before publication. Arbitrary tools or code remain unavailable.
 
-`SessionManager.create`, `open`, `continueRecent`, `list`, and `inMemory` are supported. Resume through these factories, not an invented `continueSession` SDK option. Lower-level `SessionRepo`/SQLite objects are different APIs.
+The public session operations documented below were the source basis for the current retained-session implementation.
 
-### Conversational assistant reuse plan (not implemented)
+### Conversational assistant reuse plan (historical; current implementation described above)
 
-Problem: the current adapter deliberately discards Pi's conversation capabilities. `assistant-sdk-worker.ts` creates `SessionManager.inMemory`, rejects nonempty history or tools, emits character counts instead of text deltas, accepts only one final assistant response, then disposes the session. A follow-up therefore cannot refer to an earlier answer. Replacing the browser form alone would not fix this.
+The plan below records the earlier design state. The current implementation retains one real Pi `AgentSession` per conversation in the Node host, shares one profile `ModelRuntime`, and uses session-manager checkpoints/forks for failed-turn isolation. The browser receives a narrow application contract rather than raw RPC or filesystem paths.
 
-Decision: retain the public Node SDK and existing subprocess boundary, but let Pi own the conversation. Do not introduce a second agent loop, transcript database or raw browser RPC service.
+Problem in the historical design: the earlier adapter deliberately discarded Pi's conversation capabilities. The current adapter now retains Pi conversation sessions and forwards bounded streaming events while preserving the existing context and proposal validation boundaries.
+
+Decision retained: use the public Node SDK behind an application adapter; do not introduce a second agent loop, transcript database, or raw browser RPC service.
+
+The privacy and approval requirements below remain design constraints, but their historical subprocess, memory-only credential, and fresh-session implementation details are superseded by the installed Pi runtime, Pi-managed profile credentials, and retained sessions above.
 
 User experience: normal chat uses **Send**, not a second approval dialog. Approve dataset sharing once for the conversation and provider, then chat and follow up within that scope. Show a compact provider/shared-datasets/no-rows indicator with expandable sharing details; exact payload inspection remains available, not mandatory. Confirmation is reserved for a new provider or expanded data-sharing scope, and a separate explicit Apply after local transformation preview. A model/tool continuation within the approved scope must not interrupt the user.
 
-- Keep a project-scoped Pi session identity mapped to an application-owned path. Use public `SessionManager.create`/`open` factories and an explicit private session directory; never accept a browser-supplied filesystem path or use global most-recent-session discovery. Pi's session file owns message history; SQLite owns project association, approval records and analytical artifacts.
-- Change the fixed SDK child from one-request-then-exit to a bounded session lifecycle with explicit open, prompt, abort and close messages. Reuse `session.prompt`, `subscribe`, `abort` and `waitForIdle`; reconnect loads persisted state rather than replaying the prompt. Session switching must settle/abort the previous turn and replace subscriptions. Keep existing memory-only provider credentials and disabled ambient resources.
-- Normal cancellation must leave the session reusable; disposal belongs to close/shutdown, with a bounded forced-stop fallback. Reset per-turn output/deadline accounting and bound accumulated history separately. Credential deletion/change must update or terminate the retained child, not leave an old credential snapshot usable. Pi defers a new session file until an assistant message exists: record interrupted pre-response work in application lifecycle metadata, never replay it automatically. Persisted aborted or invalid assistant content is not a validated action; if retained as conversational history, it remains subject to the same sharing scope and bounds, without a new approval dialog merely because a turn ended.
+The remaining bullets record the broader historical plan, not a claim that every listed privacy or lifecycle feature is implemented. The current checkpoint and source/tests identify implemented behavior; broader grant expansion and transformation tools remain outside this provider/authentication change.
 - Forward bounded `message_update`/`text_delta`, message lifecycle and `tool_execution_start`/`update`/`end` events into the existing browser assistant. Render a persistent transcript and follow-up composer with visible cancellation, sharing-scope changes and error states. Pi remains responsible for the actual agent/tool loop. Treat assistant text as untrusted text, and validate actionable proposals separately.
 - Treat `agent_settled`/`waitForIdle` as completion, not every `agent_end`. For queued follow-ups use `prompt` with `expandPromptTemplates: false` and Pi's `streamingBehavior`, rather than reimplementing its queue or accidentally enabling template/skill expansion.
 - Add only typed chart/transformation proposal tools through public `customTools`/`defineTool`. Reuse existing specification and evidence validation. Tools may produce review cards, never apply changes. Existing local preview/apply/undo remains authoritative. Full before/after samples and analytical artifact contents must not become tool results sent back to the provider.
@@ -154,14 +156,14 @@ Expected existing-file scope under `packages/workbench`: `src/assistant-{contrac
 
 Acceptance: a real two-turn conversation retains context after browser reload and process restart; approved scope permits ordinary Send, follow-ups and safe tool continuations without repeated approval prompts; new providers or expanded disclosure require confirmation before any send; revoked or stale grants permit zero further unauthorized sends. Real text streams incrementally; cancellation works during generation and scope confirmation; reconnect does not duplicate a turn; project/session isolation holds; malformed tool output creates no action; proposals still require local preview and explicit Apply; no dataset rows, ambient files or credentials are attached to provider context. The sharing indicator and optional inspector must accurately distinguish current attachments from previously shared history. Use the existing deterministic faux provider and browser surface for proof. Current investigation reran the existing SDK-driver contracts (11 passed), not these new multi-turn contracts.
 
-Implementation order for the later pass:
+Historical implementation order:
 
 1. Extend session/turn contracts and persistence, then retain the Pi worker across turns. Prove scoped resume, cancellation and credential revocation before connecting the browser.
 2. Implement automatic outbound scope enforcement with offline provider/transport tests. In-scope follow-ups/tool continuations require no new consent; denied, cancelled, revoked or stale scope expansions cause zero unauthorized sends. Preserve all currently supported providers; do not silently narrow support.
 3. Connect bounded text/tool events to the transcript and follow-up composer, add the compact sharing indicator and confirmation only for scope/recipient changes, then route validated proposal tools into the existing local preview/Apply controls.
 4. Exercise two-turn conversation, restart, reconnect, isolation and approval in the real browser; run focused assistant contracts and `npm run check`. This is a complete chat feature, not an independently shipped protocol scaffold.
 
-Source anchors: `packages/coding-agent/docs/sdk.md` (session/event/custom-tool APIs), `src/core/extensions/runner.ts` (`emitContext`, `emitBeforeProviderRequest`), and the existing workbench SDK worker/driver proof. This is the next bounded feature plan; implementation is deferred to a later pass under the user's permitted plan-first checkpoint, with Prompt 8 still on hold.
+Source anchors for the historical plan: `packages/coding-agent/docs/sdk.md` (session/event/custom-tool APIs), `src/core/extensions/runner.ts` (`emitContext`, `emitBeforeProviderRequest`), and the earlier workbench SDK worker/driver proof. The current retained-session implementation supersedes the planned subprocess design. Prompt 8 remains on hold.
 
 ### Alternatives and why they are not the default
 
@@ -274,15 +276,16 @@ Expected Prompt 1 change: this document only. Future root wiring stays limited t
 | Confirmed from source | npm/TypeScript/esbuild/Biome setup; supported Node SDK and JSONL RPC; experimental remote stack; real agent persistence; no ready multi-user web auth or analytical job service. |
 | Approved architecture | One workbench workspace; native DOM/CSS + esbuild shell; later direct public SDK integration; SQLite application metadata; DuckDB analytical process. |
 | Verified at Prompt 3 | Windows native ingestion/preview, memory enforcement and lifecycle, bounded response/decoded data, Parquet precision/list values, and observed near-limit artifact usage. DuckDB spill configuration is not an OS-wide disk quota. |
-| Verified at Prompt 6 | Empty SDK tools/resources, server-memory credentials, exact model-visible context, schema validation, scoped history, cancellation and offline SDK/faux-provider operation. Live external inference was not exercised. |
+| Verified at Prompt 6 (historical) | Empty SDK tools/resources, server-memory credentials, exact model-visible context, schema validation, scoped history, cancellation and offline SDK/faux-provider operation. Live external inference was not exercised. Provider/session details are superseded by the current checkpoint. |
 | Verified at Prompt 7 | Full-dataset fixed operations, exact impact and bounded samples, preview-bound approval, immutable publication, persistent undo/redo, transformed-artifact reprofiling and assistant handoff without automatic execution. The worker resource boundary is not a code/filesystem/network sandbox. |
-| Plan ready, not implemented | Reuse Pi conversational sessions/lifecycle behind the existing workbench privacy boundary. Current assistant turns remain independent; no standalone chat engine or implicit sharing of previous approvals. Prompt 8 stays on hold. |
+| Verified in the current provider/session checkpoint | Pi-native provider discovery/authentication, retained AgentSessions sharing one ModelRuntime, checkpointed turn isolation, model selection, virtual Auto routing, and restart persistence. Hosted provider inference remains unverified. |
+| Historical plan, superseded | The earlier conversational-session reuse plan below. References to a future implementation, independent sessions, subprocesses, or memory-only credentials do not describe the current source. |
 | Needs validation before generated code | Available Windows-compatible OS sandbox/runtime and fail-closed execution proof. Neither worker_threads nor subprocess RPC is enough. |
 | Deferred, not omitted | Hosted identity provider, deployment platform, shared database/blob storage, quotas, billing if ever needed. Decide at multi-user/deployment stages, not now. |
 
-## 7. Milestones and stage gates
+## 7. Milestones and stage gates (historical plan)
 
-Prompts 1–7 have been approved and implemented. Pi conversational-session reuse is now planned below for a later implementation pass, as permitted by the user. Read each later prompt immediately before its separately approved stage; do not advance automatically.
+Prompts 1–7 were approved and implemented. This historical stage plan remains useful for provenance; the current provider/session checkpoint above supersedes wording below where it describes chat as future work.
 
 | Stage | Bounded deliverable and exit gate |
 | --- | --- |
@@ -294,14 +297,14 @@ Prompts 1–7 have been approved and implemented. Pi conversational-session reus
 | 5 | Completed deterministic visualization studio and side-by-side comparison; version-bound chart specifications, bounded aggregation, native SVG rendering and exports. Verification recorded above. |
 | 6 | Pi read-only assistant and evidence-based proposals through the approved boundary, explicit context-sharing preview and validation. No arbitrary transformation execution. |
 | 7 | Completed fixed full-dataset transformations, exact impact and bounded first-row samples, preview-bound approval, immutable versions and persistent undo/redo. Current proof recorded above; arbitrary generated code remains unavailable. |
-| Before 8 | Source-grounded Pi conversational-session reuse plan complete. Implement persistent chat, streaming and proposal-tool activity within its privacy boundaries; current assistant remains fresh-session until that change. |
+| Before 8 | Source-grounded Pi conversational-session reuse plan complete; the retained Pi-native implementation is now present. Future work remains only where separately listed below. |
 | 8 | On hold. Code workspace with independently verified OS-isolated execution; no host fallback. Requires separate approval after the conversational review. |
 | 9 | Guided modeling with explicit experiment/run specifications. Read full stage requirements before implementation. |
 | 10 | Reports and project history, reproducible artifact references and export. |
 | 11 | Separate approved multi-user migration: authentication, authorization and quotas. |
 | 12–14 | Production threat/failure review, deployment design, then final product audit. Separate prompts and acceptance checks. |
 
-Local checkpoint: stages 2–7 provide inspect/profile/compare/ask/transform with explicit local approval and no arbitrary code. The planned conversational assistant is next; stages 8–10 remain deferred, not silently dropped. Each later stage has its own plan, exact expected files, tests and approval/stop gate.
+Local checkpoint: stages 2–7 provide inspect/profile/compare/ask/transform with explicit local approval and no arbitrary code. The retained Pi-native provider/session implementation is current; stages 8–10 remain deferred, not silently dropped. Each later stage has its own plan, exact expected files, tests and approval/stop gate.
 
 ### Later multi-user migration
 
@@ -310,6 +313,7 @@ Document the local trust model before exposing any remote listener. Introduce au
 Plan migrations for metadata, explicit ownership of existing local data, provider credential policy, per-user quotas, worker scheduling, temporary-disk limits, durable job recovery and audit records. Hash deduplication must not cross authorization boundaries. Remote access also needs TLS, browser-session/CSRF policy, secret management and backups. Select database/object storage based on deployment needs then; do not bolt multiple users onto the local per-launch token.
 
 ## 8. Security and privacy findings
+
 
 - **Pi defaults trust the host environment.** SDK defaults include powerful tools. `cwd` is not a filesystem jail: absolute and home-relative paths are supported. Disable ambient discovery and allow only application tools.
 - **Raw RPC is not a web API.** Its direct `bash`, session-switch and export commands can reach the filesystem independently of model-facing tool allowlists. Validate a narrow host contract instead of proxying arbitrary commands.
@@ -346,7 +350,7 @@ Commands below are verified from manifests/scripts, not all executed. Run from t
 | `npm run hydrate:model-data` | Root delegates to AI strict data-only catalog hydration. Network access required; writes ignored provider JSON, not a reason to edit `models.generated.ts`. Source-supported repair for missing data; not run during Prompt 1. |
 | `npm run check:model-data` | Validates hydrated model data. Does not replace narrow product tests. |
 | `npm run check:browser-smoke` | esbuild browser compatibility/tree-shaking check, **not** a UI browser test. |
-| `npm run dev:workbench` | Local launcher: `node packages/workbench/src/cli.ts`; defaults to loopback port 4310 and `~/.datapi/workbench`. Assistant launches its fixed SDK subprocess lazily. |
+| `npm run dev:workbench` | Current local launcher: `node packages/workbench/src/cli.ts`; defaults to loopback port 4310 and `~/.datapi/workbench`. It creates the profile `ModelRuntime` and retained AgentSessions in the Node host. |
 | `npm run dev:workbench -- --port 4310 --data-dir <directory>` | Launcher with explicit data root. Placeholder must be replaced by a real path. |
 | `npm run typecheck --workspace=@earendil-works/pi-workbench` | Browser sources/tests and their shared contracts with DOM types. Root tsgo covers server/SDK sources and Node tests separately. |
 | Focused `node --test` commands in the root README | Original ingestion/profile/chart/shell coverage, assistant contracts and five transformation files. SDK tests use a deterministic faux provider and require no paid credentials. Current checkpoint counts describe executed files, not a claim that every listed command was rerun. |
@@ -358,7 +362,7 @@ Commands below are verified from manifests/scripts, not all executed. Run from t
 | `npm run dev --workspace=@earendil-works/pi-server` | TypeScript watch only; does **not** launch an application server. |
 | `npm run build` / `npm run build:offline` | Existing ordered package builds. Offline requires hydrated data; neither is authorized or run by this documentation stage. |
 
-There is no generic root `dev` web-server command beyond the workbench launcher. The assistant establishes source execution through a fixed tsx subprocess with root aliases; it does not require built `dist` artifacts. Root checking covers Node/SDK code, and the workbench DOM configuration separately covers browser sources/tests without pulling server-only SDK modules into DOM globals.
+There is no generic root `dev` web-server command beyond the workbench launcher. The current assistant uses the installed Pi SDK directly in the trusted Node host; it does not require a fixed SDK subprocess or built `dist` artifacts. Root checking covers Node/SDK code, and the workbench DOM configuration separately covers browser sources/tests without pulling server-only SDK modules into DOM globals.
 
 Official analytical-client evidence: [DuckDB Node Neo overview](https://duckdb.org/docs/current/clients/node_neo/overview.html) documents the high-level `@duckdb/node-api` package and Windows x64 support. Local ingestion and fixed analytical-worker verification are recorded in the stage checkpoints above; future execution boundaries still require their own proof.
 
@@ -374,4 +378,4 @@ Approved architecture choices (recorded before Prompt 2):
 
 Preserve uncommitted implementation and source data. Do not automatically create branches or commit existing work; the worktree also contains the user's prompt file. Agree on checkpoint/branch action before doing either.
 
-Prompt 7 acceptance and the conversational-session reuse plan are complete. The user explicitly permitted rewriting the chatbox plan first and implementing later; this pass takes that checkpoint because preserving privacy across prior turns and tool calls requires a verified outbound-request gate. Next implement the bounded plan above using Pi's existing session engine, not an independent chat engine. The current assistant still uses fresh independent sessions. Prompt 8 and every later prompt remain separately approval-gated.
+Prompt 7 acceptance and the conversational-session reuse plan are complete. The current provider/session implementation uses Pi's existing session engine with retained AgentSessions, profile-scoped Pi credentials, and an outbound-request privacy gate. Prompt 8 and every later prompt remain separately approval-gated.

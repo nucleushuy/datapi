@@ -3,19 +3,19 @@ import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
-import type { AssistantDriver } from "./assistant-contracts.ts";
-import { PiAssistantDriver } from "./assistant-driver.ts";
+import { isProviderIdentifier, parseSessionModelSelection } from "./assistant-validation.ts";
 import { MAX_DECODED_BYTES, MAX_PREVIEW_ROWS, MAX_UPLOAD_BYTES, PAGE_SIZE, type ProjectSettings } from "./contracts.ts";
-import type { ConversationDriver } from "./conversation-contracts.ts";
+import { CONVERSATION_CREATE_BYTES, type ConversationDriver } from "./conversation-contracts.ts";
 import { PiConversationDriver } from "./conversation-driver.ts";
 import { ConversationService } from "./conversation-service.ts";
+import { ProviderService } from "./provider-service.ts";
 import { WorkbenchError, WorkbenchStore } from "./storage.ts";
 
 export interface WorkbenchOptions {
 	dataDir: string;
 	port?: number;
-	conversationDriver?: ConversationDriver & { authorizedProviders(): Promise<readonly string[]> };
-	modelCatalog?: Pick<AssistantDriver, "models"> & { close(): Promise<void> };
+	conversationDriver?: ConversationDriver;
+	providers?: ProviderService;
 }
 
 export interface WorkbenchApplication {
@@ -54,10 +54,27 @@ async function readMetadata(request: IncomingMessage, maxBytes = 32 * 1024): Pro
 	return value as Record<string, unknown>;
 }
 
+function noBody(request: IncomingMessage): void {
+	if (request.headers["transfer-encoding"] !== undefined || Number(request.headers["content-length"] ?? 0) !== 0)
+		throw new WorkbenchError(400, "This action does not accept a request body.");
+}
+
+function routeIdentifier(value: string, provider = false): string {
+	let decoded: string;
+	try {
+		decoded = decodeURIComponent(value);
+	} catch {
+		throw new WorkbenchError(400, "Invalid resource identifier.");
+	}
+	if (provider ? !isProviderIdentifier(decoded) : !/^[a-zA-Z0-9_-]{1,128}$/u.test(decoded))
+		throw new WorkbenchError(400, "Invalid resource identifier.");
+	return decoded;
+}
+
 export async function startWorkbench(options: WorkbenchOptions): Promise<WorkbenchApplication> {
 	const port = options.port ?? 4310;
 	if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error("Port must be between 0 and 65535.");
-	const [bundle, html, css] = await Promise.all([
+	const [bundle, html, css, interRegular, interSemibold, jetbrainsMono] = await Promise.all([
 		build({
 			entryPoints: [fileURLToPath(new URL("./browser/app.ts", import.meta.url))],
 			bundle: true,
@@ -69,6 +86,9 @@ export async function startWorkbench(options: WorkbenchOptions): Promise<Workben
 		}),
 		readFile(new URL("./browser/index.html", import.meta.url)),
 		readFile(new URL("./browser/style.css", import.meta.url)),
+		readFile(new URL(import.meta.resolve("@fontsource/inter/files/inter-latin-400-normal.woff2"))),
+		readFile(new URL(import.meta.resolve("@fontsource/inter/files/inter-latin-600-normal.woff2"))),
+		readFile(new URL(import.meta.resolve("@fontsource/jetbrains-mono/files/jetbrains-mono-latin-400-normal.woff2"))),
 	]);
 	const script = bundle.outputFiles[0]?.contents;
 	if (!script) throw new Error("Browser bundle is missing.");
@@ -76,11 +96,20 @@ export async function startWorkbench(options: WorkbenchOptions): Promise<Workben
 		"/": { type: "text/html; charset=utf-8", content: html },
 		"/app.js": { type: "text/javascript; charset=utf-8", content: script },
 		"/style.css": { type: "text/css; charset=utf-8", content: css },
+		"/fonts/inter-regular.woff2": { type: "font/woff2", content: interRegular },
+		"/fonts/inter-semibold.woff2": { type: "font/woff2", content: interSemibold },
+		"/fonts/jetbrains-mono.woff2": { type: "font/woff2", content: jetbrainsMono },
 	};
 	const store = new WorkbenchStore(options.dataDir);
 	await store.init();
-	const modelCatalog = options.modelCatalog ?? new PiAssistantDriver();
-	const conversationDriver = options.conversationDriver ?? new PiConversationDriver(options.dataDir);
+	let providers: ProviderService;
+	try {
+		providers = options.providers ?? (await ProviderService.create(options.dataDir));
+	} catch (error) {
+		await store.close();
+		throw error;
+	}
+	const conversationDriver = options.conversationDriver ?? new PiConversationDriver(providers);
 	const conversations = new ConversationService(store, conversationDriver);
 	const token = randomBytes(32).toString("hex");
 	const tokenBytes = Buffer.from(token);
@@ -95,7 +124,7 @@ export async function startWorkbench(options: WorkbenchOptions): Promise<Workben
 		response.setHeader("X-Frame-Options", "DENY");
 		response.setHeader(
 			"Content-Security-Policy",
-			"default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' blob:; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+			"default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; connect-src 'self'; img-src 'self' blob:; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
 		);
 		if (
 			request.headers.host !== authority ||
@@ -135,26 +164,84 @@ export async function startWorkbench(options: WorkbenchOptions): Promise<Workben
 			throw new WorkbenchError(403, "This session has expired. Reload the workbench.");
 		}
 		const parts = path.split("/").filter(Boolean);
+		if (path === "/api/providers" && method === "GET") {
+			noBody(request);
+			json(response, 200, await providers.catalog());
+			return;
+		}
+		if (parts[1] === "providers" && parts[2] && parts.length <= 4) {
+			const providerId = routeIdentifier(parts[2], true);
+			if (parts.length === 3 && method === "DELETE") {
+				noBody(request);
+				json(response, 200, await providers.disconnect(providerId));
+				return;
+			}
+			if (parts.length === 4 && parts[3] === "continue" && method === "POST") {
+				noBody(request);
+				json(response, 200, await providers.continue(providerId));
+				return;
+			}
+			if (parts.length === 4 && parts[3] === "auth" && method === "POST") {
+				const input = await readMetadata(request, 1024);
+				if (
+					Object.keys(input).length !== 1 ||
+					!Object.hasOwn(input, "type") ||
+					(input.type !== "oauth" && input.type !== "api_key")
+				)
+					throw new WorkbenchError(400, "Choose a supported authentication type.");
+				json(response, 201, providers.startAuth(providerId, input.type));
+				return;
+			}
+		}
+		if (parts[1] === "provider-auth" && parts[2] && parts.length === 3) {
+			const operationId = routeIdentifier(parts[2]);
+			if (method === "GET" || method === "DELETE") {
+				noBody(request);
+				json(
+					response,
+					200,
+					method === "GET" ? providers.authOperation(operationId) : await providers.cancelAuth(operationId),
+				);
+				return;
+			}
+			if (method === "POST") {
+				const input = await readMetadata(request, 32 * 1024);
+				if (
+					Object.keys(input).length !== 2 ||
+					!Object.hasOwn(input, "promptId") ||
+					!Object.hasOwn(input, "value") ||
+					typeof input.promptId !== "string" ||
+					!/^[a-zA-Z0-9_-]{1,128}$/u.test(input.promptId) ||
+					typeof input.value !== "string" ||
+					Buffer.byteLength(input.value) > 16 * 1024 ||
+					input.value.includes("\0")
+				)
+					throw new WorkbenchError(
+						400,
+						"Provide a valid prompt identifier and an authentication response up to 16 KiB.",
+					);
+				providers.answerAuth(operationId, input.promptId, input.value);
+				json(response, 200, providers.authOperation(operationId));
+				return;
+			}
+		}
 		if (path === "/api/chat/models" && method === "GET") {
-			const catalog = await modelCatalog.models();
-			const authorized = new Set(await conversationDriver.authorizedProviders());
-			json(response, 200, {
-				...catalog,
-				models: catalog.models.map((model) => ({ ...model, configured: authorized.has(model.provider) })),
-			});
+			noBody(request);
+			const catalog = await providers.catalog();
+			json(response, 200, { models: catalog.models, guidance: catalog.guidance });
 			return;
 		}
-		if (path === "/api/chat/credentials" && method === "POST") {
-			const input = await readMetadata(request);
-			if (Object.keys(input).length !== 2 || !Object.hasOwn(input, "provider") || !Object.hasOwn(input, "apiKey"))
-				throw new WorkbenchError(400, "Provide only the provider and literal API key.");
-			await conversationDriver.setCredential(input.provider, input.apiKey);
-			json(response, 200, { configured: true });
-			return;
-		}
-		if (parts.length === 4 && parts[1] === "chat" && parts[2] === "credentials" && method === "DELETE") {
-			await conversationDriver.deleteCredential(parts[3]);
-			json(response, 200, { configured: false });
+		if (path === "/api/chat/model" && (method === "GET" || method === "PUT")) {
+			if (method === "GET") noBody(request);
+			json(
+				response,
+				200,
+				method === "GET"
+					? await conversationDriver.draftModelState()
+					: await conversationDriver.selectDraftModel(
+							parseSessionModelSelection(await readMetadata(request, 4096)),
+						),
+			);
 			return;
 		}
 		if (path === "/api/projects") {
@@ -304,12 +391,64 @@ export async function startWorkbench(options: WorkbenchOptions): Promise<Workben
 						json(
 							response,
 							201,
-							await conversations.create(projectId, datasetId, await readMetadata(request, 256 * 1024)),
+							await conversations.create(
+								projectId,
+								datasetId,
+								await readMetadata(request, CONVERSATION_CREATE_BYTES),
+							),
 						);
 						return;
 					}
 					if (conversationId && parts.length === 7 && method === "GET") {
 						json(response, 200, await conversations.get(projectId, datasetId, conversationId));
+						return;
+					}
+					if (conversationId && parts.length === 7 && method === "PATCH") {
+						json(
+							response,
+							200,
+							await conversations.update(projectId, datasetId, conversationId, await readMetadata(request)),
+						);
+						return;
+					}
+					if (
+						conversationId &&
+						parts.length === 8 &&
+						parts[7] === "model" &&
+						(method === "GET" || method === "PUT")
+					) {
+						if (method === "GET") noBody(request);
+						json(
+							response,
+							200,
+							method === "GET"
+								? await conversations.modelState(projectId, datasetId, conversationId)
+								: await conversations.selectModel(
+										projectId,
+										datasetId,
+										conversationId,
+										await readMetadata(request, 4096),
+									),
+						);
+						return;
+					}
+					if (
+						conversationId &&
+						parts.length === 8 &&
+						method === "POST" &&
+						(parts[7] === "duplicate" || parts[7] === "archive")
+					) {
+						if (
+							request.headers["transfer-encoding"] !== undefined ||
+							Number(request.headers["content-length"] ?? 0) !== 0
+						)
+							throw new WorkbenchError(400, "This session action does not accept a request body.");
+						if (parts[7] === "duplicate")
+							json(response, 201, await conversations.duplicate(projectId, datasetId, conversationId));
+						else {
+							await conversations.archive(projectId, datasetId, conversationId);
+							json(response, 200, { archived: true });
+						}
 						return;
 					}
 					if (conversationId && parts.length === 8 && parts[7] === "events" && method === "GET") {
@@ -530,8 +669,15 @@ export async function startWorkbench(options: WorkbenchOptions): Promise<Workben
 			});
 		});
 	} catch (error) {
-		await Promise.all([conversations.close(), modelCatalog.close(), conversationDriver.close()]);
-		await store.close();
+		try {
+			await conversations.close();
+		} finally {
+			try {
+				await providers.close();
+			} finally {
+				await store.close();
+			}
+		}
 		throw error;
 	}
 	const address = server.address();
@@ -547,9 +693,16 @@ export async function startWorkbench(options: WorkbenchOptions): Promise<Workben
 					server.close((error) => (error ? reject(error) : resolve()));
 				});
 				server.closeAllConnections();
-				await Promise.all([conversations.close(), modelCatalog.close(), conversationDriver.close()]);
-				await store.close();
-				await stopped;
+				try {
+					await conversations.close();
+				} finally {
+					try {
+						await providers.close();
+					} finally {
+						await store.close();
+						await stopped;
+					}
+				}
 			})();
 			return closing;
 		},

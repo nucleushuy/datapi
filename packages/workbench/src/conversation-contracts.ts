@@ -1,8 +1,28 @@
 import type { AssistantContext, AssistantUsage } from "./assistant-contracts.ts";
 import type { ChartRecord, ChartResult, ChartSpec } from "./chart-contracts.ts";
+import type { SessionModelSelection, SessionModelState } from "./provider-contracts.ts";
 
 export const CONVERSATION_MESSAGE_BYTES = 16 * 1024;
 export const CONVERSATION_TRANSCRIPT_BYTES = 256 * 1024;
+export const CONVERSATION_SCREENSHOT_MAX_FILES = 4;
+export const CONVERSATION_SCREENSHOT_FILE_BYTES = 2 * 1024 * 1024;
+export const CONVERSATION_SCREENSHOT_TOTAL_BYTES = 4 * 1024 * 1024;
+export const CONVERSATION_CREATE_BYTES = 6 * 1024 * 1024;
+export const CONVERSATION_REQUEST_BYTES = 8 * 1024 * 1024;
+export const CONVERSATION_REASONING_EFFORTS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+export type ConversationMode = "plan" | "execute";
+export type ConversationReasoningEffort = (typeof CONVERSATION_REASONING_EFFORTS)[number];
+
+export interface ConversationScreenshotInput {
+	name: string;
+	mediaType: "image/png" | "image/jpeg" | "image/webp";
+	data: string;
+}
+
+export interface ConversationScreenshot extends ConversationScreenshotInput {
+	byteLength: number;
+	sha256: string;
+}
 
 export interface ConversationScope {
 	version: 1;
@@ -14,6 +34,8 @@ export interface ConversationScope {
 	context: AssistantContext;
 	contextHash: string;
 	grantedAt: string;
+	screenshots?: ConversationScreenshot[];
+	screenshotConsent?: true;
 }
 
 export interface ConversationMessage {
@@ -22,6 +44,7 @@ export interface ConversationMessage {
 	text: string;
 	createdAt: string;
 	state: "complete" | "cancelled" | "failed";
+	model?: SessionModelState["routedModel"];
 }
 
 export interface Conversation {
@@ -35,9 +58,12 @@ export interface Conversation {
 	state: "ready" | "running" | "failed";
 	sessionFile: string | null;
 	scope: ConversationScope;
+	modelState: SessionModelState;
 	messages: ConversationMessage[];
 	usage: AssistantUsage;
 	error: string | null;
+	mode?: ConversationMode;
+	reasoningEffort?: ConversationReasoningEffort;
 }
 
 export type ConversationEvent =
@@ -172,25 +198,39 @@ export interface ConversationChartSaved {
 
 export type ConversationDriverEvent =
 	| { type: "text"; delta: string }
+	| { type: "model"; modelState: SessionModelState }
 	| ({ type: "rename_proposal" } & RenameProposalInput)
 	| ({ type: "chart_proposal" } & ChartProposalInput);
 
+export interface ConversationDriverInput {
+	conversationId?: string;
+	provider: string;
+	modelId: string;
+	sessionFile: string | null;
+	sessionDir: string;
+	system: string;
+	user: string;
+	renameScope?: ConversationRenameScope;
+	chartScope?: AssistantContext;
+	mode?: ConversationMode;
+	reasoningEffort?: ConversationReasoningEffort;
+	images?: { type: "image"; data: string; mimeType: ConversationScreenshot["mediaType"] }[];
+}
+
+export interface ConversationModelResult {
+	modelState: SessionModelState;
+	sessionFile: string | null;
+}
+
 export interface ConversationDriver {
 	chat(
-		input: {
-			provider: string;
-			modelId: string;
-			sessionFile: string | null;
-			sessionDir: string;
-			system: string;
-			user: string;
-			renameScope?: ConversationRenameScope;
-			chartScope?: AssistantContext;
-		},
+		input: ConversationDriverInput,
 		onEvent: (event: ConversationDriverEvent) => void,
 		signal: AbortSignal,
-	): Promise<{ sessionFile: string; text: string; usage: AssistantUsage }>;
-	setCredential(provider: unknown, apiKey: unknown): Promise<void>;
-	deleteCredential(provider: string): Promise<void>;
+	): Promise<{ sessionFile: string; text: string; usage: AssistantUsage; modelState: SessionModelState }>;
+	modelState(input: ConversationDriverInput): Promise<ConversationModelResult>;
+	selectModel(input: ConversationDriverInput, selection: SessionModelSelection): Promise<ConversationModelResult>;
+	draftModelState(): Promise<SessionModelState>;
+	selectDraftModel(selection: SessionModelSelection): Promise<SessionModelState>;
 	close(): Promise<void>;
 }

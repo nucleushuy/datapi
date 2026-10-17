@@ -246,6 +246,7 @@ const conversation = initializeConversation(element("chat-workspace"), {
 	stream: streamConversation,
 	message,
 	onChanged: onDatasetChanged,
+	onDatasetSelected: selectDataset,
 	async onChartSaved(chart) {
 		if (projectId !== chart.projectId || datasetId !== chart.datasetId) return;
 		await chartStudio.refreshSaved();
@@ -269,6 +270,7 @@ function currentAssistantContext(): ConversationUiContext | null {
 	return {
 		projectId,
 		dataset,
+		datasets: datasets.map(({ id, name }) => ({ id, name })),
 		profile: richProfile,
 		selectedColumns: [
 			...new Set([
@@ -331,6 +333,8 @@ function isAborted(error: unknown): boolean {
 async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
 	const headers = new Headers(options.headers);
 	headers.set("X-Workbench-Token", token);
+	if (typeof options.body === "string" && !headers.has("Content-Type"))
+		headers.set("Content-Type", "application/json");
 	const response = await fetch(path, { ...options, headers, credentials: "same-origin", redirect: "error" });
 	let body: unknown;
 	try {
@@ -1756,6 +1760,7 @@ async function bootstrap(): Promise<void> {
 		if (!response.ok) throw new ApiError(`Could not open the local workbench (${response.status}).`, response.status);
 		const initial: Bootstrap = await response.json();
 		token = initial.token;
+		await conversation.initialize();
 		projects = initial.projects;
 		maxUploadBytes = initial.maxUploadBytes;
 		maxPreviewRows = initial.maxPreviewRows;

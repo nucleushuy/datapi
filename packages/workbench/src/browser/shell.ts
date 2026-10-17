@@ -1,10 +1,13 @@
 export type CenterTab = "data" | "code" | "visualize" | "statistics" | "models";
 export type RightTab = "assistant" | "activity";
+export type Destination = "chat" | "data" | "tools" | "settings";
 type Theme = "dark" | "light";
 
 export interface ShellController {
 	selectCenter(tab: CenterTab, focus?: boolean): void;
 	selectRight(tab: RightTab, focus?: boolean): void;
+	navigate(destination: Destination, focus?: boolean): void;
+	toggleSidebar(): void;
 	setLoading(loading: boolean): void;
 	setDatasetAvailable(available: boolean): void;
 	showError(): void;
@@ -21,6 +24,9 @@ export interface AppKeybinding {
 
 export interface AppKeybindings {
 	commandPalette: readonly AppKeybinding[];
+	toggleSidebar: readonly AppKeybinding[];
+	sendMessage: readonly AppKeybinding[];
+	newline: readonly AppKeybinding[];
 }
 
 export interface ShellOptions {
@@ -32,15 +38,21 @@ export const DEFAULT_APP_KEYBINDINGS: AppKeybindings = {
 		{ key: "k", ctrl: true },
 		{ key: "k", meta: true },
 	],
+	toggleSidebar: [
+		{ key: "b", ctrl: true },
+		{ key: "b", meta: true },
+	],
+	sendMessage: [{ key: "Enter" }],
+	newline: [{ key: "Enter", shift: true }],
 };
 
 export function matchesAppKeybinding(event: KeyboardEvent, binding: AppKeybinding): boolean {
 	return (
 		event.key.toLowerCase() === binding.key.toLowerCase() &&
-		event.ctrlKey === Boolean(binding.ctrl) &&
-		event.metaKey === Boolean(binding.meta) &&
-		event.altKey === Boolean(binding.alt) &&
-		event.shiftKey === Boolean(binding.shift)
+		Boolean(event.ctrlKey) === Boolean(binding.ctrl) &&
+		Boolean(event.metaKey) === Boolean(binding.meta) &&
+		Boolean(event.altKey) === Boolean(binding.alt) &&
+		Boolean(event.shiftKey) === Boolean(binding.shift)
 	);
 }
 
@@ -61,6 +73,7 @@ interface ShellPreferences {
 	centerTab: CenterTab;
 	rightTab: RightTab;
 	theme: Theme;
+	sidebarCollapsed: boolean;
 }
 
 const DEFAULT_PREFERENCES: Readonly<ShellPreferences> = {
@@ -70,6 +83,7 @@ const DEFAULT_PREFERENCES: Readonly<ShellPreferences> = {
 	centerTab: "data",
 	rightTab: "assistant",
 	theme: "dark",
+	sidebarCollapsed: false,
 };
 
 function clamp(value: number, minimum: number, maximum: number): number {
@@ -99,6 +113,7 @@ function restorePreferences(value: unknown): ShellPreferences {
 				? (value.rightTab as RightTab)
 				: DEFAULT_PREFERENCES.rightTab,
 		theme: "theme" in value && value.theme === "light" ? "light" : "dark",
+		sidebarCollapsed: "sidebarCollapsed" in value && value.sidebarCollapsed === true,
 	};
 }
 
@@ -143,6 +158,28 @@ export function initializeShell(document: Document, window: Window, options: She
 	const results = element<HTMLUListElement>("command-results");
 	const emptyCommands = element("command-empty");
 	const closeButton = element<HTMLButtonElement>("command-close");
+	const chatWorkspace = element("chat-workspace");
+	const sessionSidebar = element("session-sidebar");
+	const sidebarClose = element<HTMLButtonElement>("sidebar-close");
+	const sidebarBackdrop = element<HTMLButtonElement>("sidebar-backdrop");
+	const sessionsButton = element<HTMLButtonElement>("rail-sessions");
+	const operation = element("operation");
+	const operationLink = element<HTMLButtonElement>("shell-operation-link");
+	const operationHome = document.createComment("Local operation position");
+	operation.before(operationHome);
+	const destinations = {
+		chat: element("chat-destination"),
+		data: element("data-destination"),
+		tools: element("tools-destination"),
+		settings: element("settings-destination"),
+	};
+	const destinationButtons: readonly [string, Destination][] = [
+		["rail-sessions", "chat"],
+		["rail-files", "data"],
+		["rail-data", "data"],
+		["rail-tools", "tools"],
+		["rail-settings", "settings"],
+	];
 	const compact = window.matchMedia("(max-width: 1099px)");
 	const stacked = window.matchMedia("(max-width: 699px)");
 	const keybindings: AppKeybindings = { ...DEFAULT_APP_KEYBINDINGS, ...options.keybindings };
@@ -158,6 +195,10 @@ export function initializeShell(document: Document, window: Window, options: She
 	let selectedCommand = -1;
 	let filteredCommands: PaletteCommand[] = [];
 	let commandOptions: HTMLLIElement[] = [];
+	let destination: Destination = "chat";
+	let mobileSidebarOpen = false;
+	let sidebarReturnFocus: HTMLElement | null = null;
+	let wasMobile = stacked.matches;
 
 	function listen<E extends Event>(target: EventTarget, type: string, handler: (event: E) => void): void {
 		const listener = handler as EventListener;
@@ -186,10 +227,177 @@ export function initializeShell(document: Document, window: Window, options: She
 		}
 	}
 
+	function emit(type: string): void {
+		const event = document.createEvent("CustomEvent");
+		event.initCustomEvent(type, true, false, undefined);
+		document.dispatchEvent(event);
+	}
+
+	function applySidebar(): void {
+		const open = destination === "chat" && (stacked.matches ? mobileSidebarOpen : !preferences.sidebarCollapsed);
+		const focused = document.activeElement;
+		sessionSidebar.hidden = !open;
+		destinations.chat.dataset.sidebar = open ? "open" : "closed";
+		sessionsButton.setAttribute("aria-expanded", String(open));
+		sidebarBackdrop.hidden = !(open && stacked.matches);
+		chatWorkspace.inert = open && stacked.matches;
+		if (stacked.matches && open) {
+			sessionSidebar.setAttribute("role", "dialog");
+			sessionSidebar.setAttribute("aria-modal", "true");
+		} else {
+			sessionSidebar.removeAttribute("role");
+			sessionSidebar.removeAttribute("aria-modal");
+		}
+		if (!open && focused && sessionSidebar.contains(focused)) sessionsButton.focus();
+	}
+
+	function setSidebar(open: boolean, focus = true): void {
+		if (disposed) return;
+		if (stacked.matches) {
+			mobileSidebarOpen = open;
+			if (open) sidebarReturnFocus = document.activeElement as HTMLElement | null;
+		} else {
+			preferences.sidebarCollapsed = !open;
+			persist();
+		}
+		applySidebar();
+		if (open && focus) sidebarClose.focus();
+		else if (!open && focus) {
+			(sidebarReturnFocus?.isConnected ? sidebarReturnFocus : sessionsButton).focus();
+			sidebarReturnFocus = null;
+		}
+	}
+
+	function navigate(next: Destination, focus = true): void {
+		if (disposed || !Object.hasOwn(destinations, next)) return;
+		finishDrag(false);
+		destination = next;
+		document.body.dataset.destination = next;
+		mobileSidebarOpen = false;
+		for (const [name, panel] of Object.entries(destinations)) panel.hidden = name !== next;
+		for (const [id, target] of destinationButtons) {
+			const button = element(id);
+			const active = target === next;
+			button.classList.toggle("rail-button-active", active);
+			if (active) button.setAttribute("aria-current", "page");
+			else button.removeAttribute("aria-current");
+		}
+		if (next === "tools") element("tools-operation-host").append(operation);
+		else operationHome.after(operation);
+		const skip = document.querySelector<HTMLAnchorElement>(".skip-link");
+		if (skip)
+			skip.href = next === "chat" ? "#chat-workspace" : next === "data" ? "#workspace" : `#${next}-destination`;
+		applyLayout();
+		if (focus) (next === "chat" ? chatWorkspace : next === "data" ? workspace : destinations[next]).focus();
+		if (next === "settings") emit("workbench:open-settings");
+	}
+
+	function toggleSidebar(): void {
+		if (destination !== "chat") {
+			navigate("chat", false);
+			setSidebar(true);
+		} else setSidebar(sessionSidebar.hidden);
+	}
+
+	function newSession(): void {
+		navigate("chat");
+		emit("workbench:new-session");
+	}
+
+	function openChatPanel(type: "tools"): void {
+		navigate("chat");
+		emit(`workbench:open-${type}`);
+	}
+
+	for (const [id, target] of destinationButtons) {
+		if (id === "rail-sessions") continue;
+		listen(element(id), "click", () => {
+			navigate(target);
+			if (id === "rail-files") element("datasets-label").scrollIntoView?.({ block: "nearest" });
+		});
+	}
+	listen(sessionsButton, "click", toggleSidebar);
+	listen(sidebarClose, "click", () => setSidebar(false));
+	listen(sidebarBackdrop, "click", () => setSidebar(false));
+	listen(element("rail-new-session"), "click", newSession);
+	for (const id of ["rail-home", "data-back-chat", "tools-back-chat", "settings-back-chat", "inspector-open-chat"]) {
+		listen(element(id), "click", () => navigate("chat"));
+	}
+	for (const id of ["session-project", "tools-open-data"]) listen(element(id), "click", () => navigate("data"));
+	listen(element("inspector-open-tools"), "click", () => navigate("tools"));
+	listen(element("tools-review-chat"), "click", () => openChatPanel("tools"));
+	listen(element("settings-provider"), "click", () => emit("workbench:open-settings"));
+	listen(operationLink, "click", () => navigate("tools"));
+	listen<CustomEvent<Destination>>(document, "workbench:navigate", (event) => navigate(event.detail));
+	listen<MouseEvent>(sessionSidebar, "click", (event) => {
+		const target = event.target as HTMLElement | null;
+		if (stacked.matches && target?.closest(".chat-session-select:not(:disabled), #conversation-new:not(:disabled)")) {
+			setSidebar(false, false);
+			chatWorkspace.focus();
+		}
+	});
+	listen<KeyboardEvent>(document, "keydown", (event) => {
+		if (!stacked.matches || !mobileSidebarOpen || dialog.open || event.isComposing) return;
+		if (event.key === "Escape") {
+			event.preventDefault();
+			setSidebar(false);
+		} else if (event.key === "Tab") {
+			const focusable = [
+				...sessionSidebar.querySelectorAll<HTMLElement>(
+					"button:not(:disabled), input:not(:disabled), select:not(:disabled), summary, [tabindex='0']",
+				),
+			].filter(
+				(item) => !item.closest("[hidden]") && (!item.closest("details:not([open])") || item.tagName === "SUMMARY"),
+			);
+			const first = focusable[0] ?? sessionSidebar;
+			const last = focusable.at(-1) ?? sessionSidebar;
+			if (event.shiftKey && (document.activeElement === first || !sessionSidebar.contains(document.activeElement))) {
+				event.preventDefault();
+				last.focus();
+			} else if (
+				!event.shiftKey &&
+				(document.activeElement === last || !sessionSidebar.contains(document.activeElement))
+			) {
+				event.preventDefault();
+				first.focus();
+			}
+		}
+	});
+	const projectSelect = element<HTMLSelectElement>("project-select");
+	function updateProjectLabel(): void {
+		element("session-project-label").textContent =
+			projectSelect.selectedOptions[0]?.textContent || "Choose a project";
+	}
+	function updateOperationStatus(): void {
+		element("tools-operation-empty").hidden = !operation.hidden;
+		operationLink.hidden = operation.hidden;
+		operationLink.textContent = `Local operation · ${operation.dataset.state || "view activity"}`;
+	}
+	const Observer = document.defaultView?.MutationObserver;
+	if (Observer) {
+		const projectObserver = new Observer(updateProjectLabel);
+		projectObserver.observe(projectSelect, { subtree: true, childList: true, characterData: true, attributes: true });
+		projectObserver.observe(element("project-heading"), { childList: true, characterData: true, subtree: true });
+		const operationObserver = new Observer(updateOperationStatus);
+		operationObserver.observe(operation, { attributes: true, attributeFilter: ["hidden", "data-state"] });
+		cleanup.push(
+			() => projectObserver.disconnect(),
+			() => operationObserver.disconnect(),
+		);
+	}
+	listen(projectSelect, "change", updateProjectLabel);
+	updateProjectLabel();
+	updateOperationStatus();
+
 	function applyLayout(): void {
-		const width = layout.getBoundingClientRect().width || layout.clientWidth || window.innerWidth;
+		const width = layout.getBoundingClientRect().width || layout.clientWidth || window.innerWidth - 52;
 		const isStacked = stacked.matches;
 		const isCompact = compact.matches;
+		if (wasMobile !== isStacked) {
+			mobileSidebarOpen = false;
+			wasMobile = isStacked;
+		}
+		applySidebar();
 		leftWidth = clamp(preferences.leftWidth, LEFT_MIN, LEFT_MAX);
 		rightWidth = clamp(preferences.rightWidth, RIGHT_MIN, RIGHT_MAX);
 		if (!isStacked) {
@@ -205,8 +413,8 @@ export function initializeShell(document: Document, window: Window, options: She
 		// Only rendered widths change on a smaller viewport; desktop preferences remain intact.
 		layout.style.setProperty("--left-panel-width", `${leftWidth}px`);
 		layout.style.setProperty("--right-panel-width", `${rightWidth}px`);
-		leftSplitter.hidden = isStacked;
-		rightSplitter.hidden = isCompact;
+		leftSplitter.hidden = destination !== "data" || isStacked;
+		rightSplitter.hidden = destination !== "data" || isCompact;
 		for (const [splitter, minimum, maximum, current] of [
 			[leftSplitter, LEFT_MIN, leftMaximum, leftWidth],
 			[rightSplitter, RIGHT_MIN, rightMaximum, rightWidth],
@@ -406,19 +614,31 @@ export function initializeShell(document: Document, window: Window, options: She
 		applyTheme();
 		applyLayout();
 		persist();
+		applySidebar();
 	}
 
 	const commands: PaletteCommand[] = [
 		...CENTER_TABS.map((tab) => ({
 			id: `center-${tab}`,
 			label: `Show ${tab[0].toUpperCase()}${tab.slice(1)}`,
-			run: () => selectCenter(tab, true),
+			run: () => {
+				navigate("data", false);
+				selectCenter(tab, true);
+			},
 		})),
 		...RIGHT_TABS.map((tab) => ({
 			id: `right-${tab}`,
 			label: `Show ${tab[0].toUpperCase()}${tab.slice(1)}`,
-			run: () => selectRight(tab, true),
+			run: () => {
+				navigate("data", false);
+				selectRight(tab, true);
+			},
 		})),
+		{ id: "chat", label: "Open chat workspace", run: () => navigate("chat") },
+		{ id: "new-session", label: "New chat session", run: newSession },
+		{ id: "sessions", label: "Toggle sessions sidebar", run: toggleSidebar },
+		{ id: "tools", label: "Open tools and activity", run: () => navigate("tools") },
+		{ id: "settings", label: "Open settings", run: () => navigate("settings") },
 		{ id: "theme", label: "Toggle light / dark theme", run: toggleTheme },
 		{ id: "reset-layout", label: "Reset layout and preferences", run: resetLayout },
 	];
@@ -536,10 +756,16 @@ export function initializeShell(document: Document, window: Window, options: She
 	});
 	listen<KeyboardEvent>(document, "keydown", (event) => {
 		if (event.defaultPrevented || event.isComposing || event.repeat) return;
-		if (!keybindings.commandPalette.some((binding) => matchesAppKeybinding(event, binding))) return;
-		event.preventDefault();
-		if (dialog.open) closePalette();
-		else openPalette();
+		const target = event.target as HTMLElement | null;
+		if (typeof target?.closest === "function" && target.closest('[aria-modal="true"]')) return;
+		if (keybindings.commandPalette.some((binding) => matchesAppKeybinding(event, binding))) {
+			event.preventDefault();
+			if (dialog.open) closePalette();
+			else openPalette();
+		} else if (!dialog.open && keybindings.toggleSidebar.some((binding) => matchesAppKeybinding(event, binding))) {
+			event.preventDefault();
+			toggleSidebar();
+		}
 	});
 	listen(themeToggle, "click", toggleTheme);
 	listen(resetButton, "click", resetLayout);
@@ -549,6 +775,7 @@ export function initializeShell(document: Document, window: Window, options: She
 		if (disposed) return;
 		loading.hidden = !value;
 		workspace.setAttribute("aria-busy", String(value));
+		chatWorkspace.setAttribute("aria-busy", String(value));
 	}
 
 	function setDatasetAvailable(available: boolean): void {
@@ -567,15 +794,23 @@ export function initializeShell(document: Document, window: Window, options: She
 	listen(window, "error", showError);
 	listen(window, "unhandledrejection", showError);
 	applyTheme();
-	applyLayout();
+	navigate("chat", false);
 	setLoading(!loading.hidden);
 	setDatasetAvailable(false);
 	search.setAttribute("aria-expanded", "false");
 	persist();
 
 	return {
-		selectCenter,
-		selectRight,
+		selectCenter(tab, focus) {
+			navigate("data", false);
+			selectCenter(tab, focus);
+		},
+		selectRight(tab, focus) {
+			navigate("data", false);
+			selectRight(tab, focus);
+		},
+		navigate,
+		toggleSidebar,
 		setLoading,
 		setDatasetAvailable,
 		showError,
@@ -583,6 +818,12 @@ export function initializeShell(document: Document, window: Window, options: She
 			if (disposed) return;
 			finishDrag(false);
 			closePalette();
+			mobileSidebarOpen = false;
+			chatWorkspace.inert = false;
+			operationHome.after(operation);
+			operationHome.remove();
+			sessionSidebar.removeAttribute("aria-modal");
+			sessionSidebar.removeAttribute("role");
 			disposed = true;
 			for (const remove of cleanup) remove();
 		},

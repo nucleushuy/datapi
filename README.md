@@ -2,7 +2,7 @@
 
 **A local-first data-science workbench built around [Pi](https://pi.dev).**
 
-Data Pi brings dataset exploration, profiling, visualization, reproducible transformations, and AI-assisted discussion into one browser workspace. Inspect your data in the center, navigate projects on the left, and keep a persistent Pi conversation on the right.
+Data Pi brings dataset exploration, profiling, visualization, reproducible transformations, and AI-assisted discussion into one browser workspace. Start in a persistent Pi conversation, browse sessions on the left, and open the Data destination for dataset tools without losing the chat.
 
 The goal is a keyboard-first workbench for data scientists—not a generic dashboard or an unrestricted coding agent. Dataset versions, columns, charts, evidence, and transformation records are explicit, inspectable objects.
 
@@ -18,11 +18,11 @@ The goal is a keyboard-first workbench for data scientists—not a generic dashb
 | Visualize | Histogram, box plot, bar, line, scatter, heatmap, correlation, and missingness charts; linked data/chart and chart/chart comparisons |
 | Save and export | Version-bound chart configurations; PNG, SVG, HTML, JSON, and inspectable Python plotting code |
 | Transform | Fixed validated operations, full-dataset impact previews, inspectable DuckDB SQL, separate approval, immutable output versions, undo/redo |
-| Discuss | Right-side Pi chat, incremental replies, persistent sessions and follow-ups, cancellation, provider/model selection |
+| Discuss | Chat-first Pi sessions, streaming replies, rich Markdown/math/code, cancellation, model/reasoning controls, Analyst/Reviewer prompts, Plan/Execute modes, session rename/duplicate/archive and JSON/Markdown export |
 | Propose a rename | Pi proposes one disclosed column rename; local preview, exact-preview approval or rejection, persistent audit and output version |
 | Propose a chart | Pi proposes a typed chart with frozen evidence; local rendered preview, inspectable JSON/Python, separate save or reject, persistent audit |
-| Attach context | Dataset/profile/column/filter/chart metadata, explicitly approved text files, and selected safe metadata from prior transformation results |
-| Navigate | Resizable panels, command palette, keyboard navigation, themes, and responsive layouts |
+| Attach context | Dataset/profile/column/filter/chart metadata, explicitly approved text files and screenshots, and selected safe metadata from prior transformation results |
+| Navigate | Compact icon rail, searchable grouped sessions, collapsible sidebar, command palette, themes, responsive layouts and preserved resizable Data panels |
 
 Transformations include rename/cast/drop, row filters, missing-value handling, deduplication, category mapping, datetime extraction, scaling, encoding, and derived columns from validated expressions. They are application-defined operations, not arbitrary SQL or model-generated code execution.
 
@@ -41,12 +41,13 @@ Requirements:
 
 - **Windows 10 or later, x64.** Analytical workers fail closed on unsupported platforms.
 - **Node.js 22.19.0 or newer** and npm. Check `node --version` before starting; older Node 22 versions cannot run this repository's TypeScript directly.
-- A modern browser. A provider API key is optional for local data tools and required for hosted AI chat.
+- A modern browser. A Pi-supported provider connection (OAuth, API key, or environment credentials) is required for hosted AI chat, but not for local data tools.
 
 From the repository root:
 
 ```bash
 npm install --ignore-scripts
+npm run patch:pi-security
 npm run dev:workbench
 ```
 
@@ -58,28 +59,22 @@ To use a different port or storage directory:
 npm run dev:workbench -- --port 4311 --data-dir ./local-workbench-data
 ```
 
-If the offline provider model catalog is missing, hydrate it explicitly:
-
-```bash
-npm run hydrate:model-data
-```
-
-Catalog hydration downloads model metadata, not datasets. A full monorepo build is not required to start the workbench.
+The workbench uses its installed Pi SDK and bundled model catalog. Its worker runtime configuration isolates package resolution from the monorepo's source aliases. A full monorepo build is not required to start the workbench. Developing the upstream source SDK separately may require `npm run hydrate:model-data`; that downloads model metadata, not datasets.
 
 ### First workflow
 
-1. Create a project and import a CSV or Parquet file.
+1. Open **Data sources**, create a project and import a CSV or Parquet file.
 2. Inspect the preview and run a profile. Review sampling and approximation notices.
 3. Open **Visualize** to configure, render, compare, and save charts.
 4. Open **Data → Transform** to preview a fixed operation. Inspect its SQL and impact, approve that exact preview, then apply it.
-5. Open **Chat → Connect a provider**, enter a literal API key, and select a model. Review **Context to share**, then send a question.
-6. Optionally attach text files or select prior transformation results before the first message. File contents require explicit consent. Follow-ups reuse the saved context; choose **New chat** to change it.
-7. Ask Pi to rename a disclosed column. In its proposal card, choose **Preview**, inspect the SQL and counts, then check approval and choose **Approve and apply**, or **Reject**. After applying, use **New chat** for the new version; **Data → Transform** provides history and undo/redo.
+5. Open **Chat → Context & provider → Connect a provider**. Choose a Pi-provided OAuth method or enter a literal API key when supported, then select a model in the composer. Review **Context to share**, choose **Plan** or **Execute**, then send a question.
+6. Optionally attach text files, paste/drop screenshots, or select prior transformation results before the first message. Text and images require separate consent. Follow-ups reuse frozen context; choose **New session** to change it.
+7. In **Execute**, ask Pi to rename a disclosed column. Choose **Preview**, inspect the SQL and counts, then **Allow once** or **Deny**. After applying, use **New session** for the new version; **Data → Transform** provides history and undo/redo.
 8. Ask Pi for a chart using disclosed fields. Choose **Preview chart**, inspect its evidence, sampling, warnings, chart specification and generated Python, then approve the exact preview and **Save chart**, or **Reject**. Saving adds a configuration to **Visualize → Saved chart configurations**; it does not change the dataset. Reload retains the decision and preview receipt, but requires a new local preview before approval.
 
 For example, a failure-rate comparison can use time on X, a validated numeric 0/1 failure indicator on Y, mean aggregation, and machine type as a facet. Disclose these fields before starting the chat. The mean is a rate only when that binary encoding is valid; profile evidence and chart previews do not establish causation.
 
-Use **Commands** or **Ctrl+K** for navigation and layout actions. Panel separators and tab groups support keyboard navigation. On narrow screens, the side panels stack below the workspace rather than compressing it into an unusable layout.
+Use **Commands** or **Ctrl+K** for navigation; **Ctrl+B/Meta+B** toggles sessions. The composer supports configurable Enter/Shift+Enter bindings, `@` references and `/` workflows. Analyst and Reviewer select inspectable prompt instructions, not additional execution privileges. Edit and Regenerate prepare drafts for review, never silently rewrite saved history. Session menus rename, duplicate, export or archive; archive preserves the audit. Narrow screens use a focus-trapped session overlay.
 
 ## Privacy and execution boundaries
 
@@ -87,6 +82,9 @@ Use **Commands** or **Ctrl+K** for navigation and layout actions. Panel separato
 
 - Dataset rows and cell samples are **not automatically attached** to chat. A file you choose or text you paste can still contain sensitive data; inspect it before sending.
 - Text attachments support UTF-8 `.py`, `.sql`, `.txt`, `.md`, and `.json`: at most **8 files, 8 KiB each, 32 KiB total**. They are reference text and are never executed.
+- Pasted/dropped screenshots support non-animated PNG, JPEG and WebP: **4 images, 2 MiB each, 4 MiB total**, at most 8192 pixels per side and 16 megapixels. Inspect and consent before Send. Images are frozen with binary hashes and sent as image blocks, never base64 text prompts. Session exports omit attachment bodies and screenshot bytes.
+- Rich messages support sanitized Markdown, formulas, citations, highlighted code and diffs. Model HTML is not activated and remote images are not fetched.
+- **Plan** cannot propose or apply changes. **Execute** enables only the existing scoped proposal tools. **Always allow for this session** retains only the exact preview/version grant; it never authorizes unseen operations or automatic execution.
 - Saved chat context includes exact attachment contents, UTF-8 byte lengths, and SHA-256 hashes. Reloading or following up does not silently substitute current files or a newer dataset version.
 - Selected transformation results share only scoped IDs, status, version references, operation kind, timestamps, and numeric impact counts—not SQL, preview cells, or raw errors. A preview is not an applied change.
 - Pi's chat tools are `propose_column_rename` and `propose_chart`. They propose operations on the frozen disclosed schema; they cannot preview, apply, approve, save, read files, run shell/Python, or execute arbitrary SQL. Their acknowledgement means awaiting local review, not an applied or saved operation.
@@ -95,10 +93,9 @@ Use **Commands** or **Ctrl+K** for navigation and layout actions. Panel separato
 - Chart exports can contain bounded dataset values and category labels. Generated Python reproduces the exported chart data; the application does not execute it.
 
 ### Credentials and local storage
+The default data root is `~/.datapi/workbench`. SQLite stores application metadata; original uploads, immutable DuckDB versions, and Pi session files remain local. Pi stores provider credentials at `<data-dir>/pi/auth.json` and persists them across restarts. This is a local credential file, **not an encrypted secret vault**; protect the data directory and its backups.
 
-The default data root is `~/.datapi/workbench`. SQLite stores application metadata; original uploads, immutable DuckDB versions, and Pi session files remain local. Chat keys use Pi credential storage at `<data-dir>/pi/auth.json` and persist across restarts. This is a local credential file, **not an encrypted secret vault**; protect the data directory and its backups.
-
-Chat accepts explicit literal API keys for Anthropic, OpenAI, Google, Mistral, xAI, Groq, OpenRouter, and Cerebras. It does not automatically reuse the Pi CLI login, load environment-key templates, execute credential commands, or provide an OAuth login. A configured key is not proof of provider authorization or model entitlement.
+Provider discovery, authentication methods, OAuth flows, API-key flows, and available models come from the installed Pi runtime. OAuth opens the exact provider URL emitted by Pi; provider passwords are entered on the provider's page, not in the workbench. Pi can request a manual authorization code or redirect URL in the workbench. API keys use masked inputs cleared after submission; saved credentials are never returned to the browser or stored in browser storage. A configured connection is not proof of provider authorization or model entitlement.
 
 The server binds to loopback and checks local request authority, origin, and a per-launch token. It is a single-user local application, not a service to expose publicly. Worker process separation and resource limits are **not a filesystem/network sandbox**.
 
@@ -124,8 +121,8 @@ Browser workbench — TypeScript, native DOM/CSS
 Node.js workbench host — projects, context, approvals, persistence
         |                              |
         v                              v
-Bounded analytical workers        Pi SDK subprocess
-DuckDB + fixed operations         streamed chat + typed proposals
+Bounded analytical workers        Retained Pi AgentSessions
+DuckDB + fixed operations         shared server-side ModelRuntime
         |                              |
         v                              v
 Immutable dataset versions        Saved Pi session history
@@ -133,7 +130,10 @@ Immutable dataset versions        Saved Pi session history
                   Local data root
 ```
 
-The web application lives in [`packages/workbench`](packages/workbench). It reuses the repository's npm workspaces, TypeScript tooling, esbuild, and Pi SDK rather than adding a separate agent engine or frontend framework. SQLite application records and Pi conversation history have distinct roles. Each subsequent turn forks the saved SDK session into a separate snapshot, selected only when its transcript and proposals commit successfully. Failed or cancelled turns cannot alter the published history; workers are not kept alive indefinitely.
+The web application lives in [`packages/workbench`](packages/workbench). It reuses the repository's npm workspaces, TypeScript tooling, esbuild, and Pi SDK rather than adding a separate agent engine or frontend framework. The Node host retains Pi chat sessions with one shared `ModelRuntime` for this local profile. SQLite application records and Pi conversation history have distinct roles. Session-manager checkpoints and forked snapshots keep failed, cancelled, or uncommitted turns out of published history. Analytical operations remain in bounded worker processes; chat authentication and SDK execution run in the trusted Node host.
+
+Workers use `packages/workbench/tsconfig.runtime.json` to resolve the declared installed SDK, not the root source aliases. `npm run check` separately typechecks all workbench source/tests against that package boundary.
+
 The archive includes release model data and native prebuilds. `--offline-model-data` uses that model data without refreshing provider catalogs. The script installs dependencies and builds the executable with its runtime assets; pass `--skip-install` if dependencies are already provided.
 
 ## Development and verification
@@ -141,15 +141,20 @@ The archive includes release model data and native prebuilds. `--offline-model-d
 Run from the repository root with a supported Node version:
 
 ```bash
-node --import tsx --test --test-concurrency=2 packages/workbench/test/assistant-context.test.ts packages/workbench/test/assistant-storage.test.ts packages/workbench/test/conversation-driver.test.ts packages/workbench/test/conversation-http.test.ts packages/workbench/test/conversation-proposals.test.ts packages/workbench/test/conversation-rename-http.test.ts packages/workbench/test/conversation-chart.test.ts packages/workbench/test/conversation-chart-http.test.ts packages/workbench/test/conversation-chart-proposals.test.ts packages/workbench/test/browser/conversation.test.ts packages/workbench/test/browser/chart-studio.test.ts packages/workbench/test/browser/shell.test.ts packages/workbench/test/chart-storage.test.ts packages/workbench/test/transform-storage.test.ts packages/workbench/test/transform-server.test.ts
+node --test packages/workbench/test/conversation-driver.test.ts packages/workbench/test/conversation-http.test.ts packages/workbench/test/conversation-proposals.test.ts packages/workbench/test/conversation-chart-proposals.test.ts packages/workbench/test/conversation-screenshots.test.ts packages/workbench/test/browser/conversation.test.ts packages/workbench/test/browser/message-content.test.ts packages/workbench/test/browser/shell.test.ts
+node --test packages/workbench/test/provider-service.test.ts packages/workbench/test/provider-router.test.ts packages/workbench/test/provider-http.test.ts packages/workbench/test/browser/providers.test.ts packages/workbench/test/browser/ingestion.test.ts
 npm run check
 ```
 
-These focused tests cover context and attachment boundaries, SDK/subprocess streaming, cancellation, failed-turn isolation, HTTP body limits, rename and chart review, stale and altered previews, transaction rollback, restart, undo, and browser behavior. They use Pi's deterministic local test provider, not paid API calls. The serial SDK subprocess suite has an eight-minute deadline. `npm run check` formats/lints, checks dependency/import/lock consistency, typechecks Node/browser code, and checks browser bundling; it does not run tests.
+These focused tests cover context and attachment boundaries, SDK streaming, cancellation, failed-turn isolation, HTTP body limits, rename and chart review, stale and altered previews, transaction rollback, restart, undo, and browser behavior. They use Pi's deterministic local test provider, not paid API calls. `npm run check` formats/lints, checks dependency/import/lock consistency, typechecks Node/browser code, and checks browser bundling; it does not run tests.
 
-Latest chart-proposal validation: **146 tests passed across these 15 files**, with no failures, cancellations or skips. Final `npm run check` passed with no fixes or diagnostics. Node emits its existing experimental SQLite/MockTimers notices during tests.
+Historical chart-proposal validation passed 146 tests. For the chat-first interface, focused UI, screenshot/proposal, and real SDK/HTTP boundary tests pass, and the workbench package typecheck passes. The root check currently reports upstream AI source/model-catalog type errors; it is not a clean repository-wide result. Node emits its existing experimental SQLite notices during tests.
 
 Real chart browser smoke covered a faceted failure-rate line chart, frozen evidence, local rendering, explicit save, Visualize list refresh, keyboard rejection, reload/server-restart persistence, busy-worker retry, reload-without-render approval blocking, and 1440px/390px layouts. Earlier rename and attachment smoke covered exact approval, stale blocking, undo/redo, file consent, incremental text, frozen references and cancellation. Hosted-provider inference has **not** been verified by these local-provider smoke tests.
+
+Provider acceptance verification: 111 focused provider, routing, retained-session, conversation UI, and bundled-app transport tests passed. Workbench typechecking, browser bundling, and the Pi callback security-patch check passed. Actual browser smoke exercised API-key submission with a non-production test value, Pi catalog display, disconnect, masked-input cancellation, and desktop/mobile layouts. The test credential was removed afterward. This verifies configuration and transport, not a valid hosted credential or completed hosted OAuth login; account-switching and device/manual-code flows use deterministic Pi test providers.
+
+After formatting, the conversation HTTP restart proof and three changed browser test files passed together: 92 tests, zero failures. These overlap the 111-test run above and are not additive.
 
 See [AGENTS.md](AGENTS.md) for development rules, [CONTRIBUTING.md](CONTRIBUTING.md) for contribution policy, and the [implementation plan](docs/data-science-workbench-plan.md) for historical stages and future direction.
 

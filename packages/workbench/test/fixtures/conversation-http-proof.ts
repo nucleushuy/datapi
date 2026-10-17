@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import type { Bootstrap, ImportJob } from "../../src/contracts.ts";
 import type { Conversation, ConversationEvent } from "../../src/conversation-contracts.ts";
+import { MetadataStore } from "../../src/metadata.ts";
+import type { SessionModelState } from "../../src/provider-contracts.ts";
 import { startWorkbench, type WorkbenchApplication } from "../../src/server.ts";
 import { WorkbenchStore } from "../../src/storage.ts";
 import { createFauxConversationDriver } from "./conversation-faux-driver.ts";
@@ -85,11 +87,16 @@ test("HTTP chat streams frozen references through Pi and resumes after restart",
 	});
 	t.after(() => release());
 	let fixture = await createFauxConversationDriver(dataDir, { beforeResult: () => gate });
-	await fixture.driver.setCredential("openai", "literal-test-not-a-real-key");
-	app = await startWorkbench({ dataDir, port: 0, conversationDriver: fixture.driver, modelCatalog: fixture.catalog });
+	app = await startWorkbench({ dataDir, port: 0, conversationDriver: fixture.driver, providers: fixture.providers });
 	let bootstrap = (await (await fetch(`${app.url}/api/bootstrap`)).json()) as Bootstrap;
 	let headers = { "Content-Type": "application/json", "X-Workbench-Token": bootstrap.token };
 	const path = `/api/projects/${project.id}/datasets/${dataset.id}/conversations`;
+	const defaultSelection = { provider: "openai", modelId: "fixture", thinkingLevel: "off", persist: true };
+	assert.equal(
+		(await fetch(`${app.url}/api/chat/model`, { method: "PUT", headers, body: JSON.stringify(defaultSelection) }))
+			.status,
+		200,
+	);
 	const attachments = Array.from({ length: 4 }, (_, index) => ({
 		name: `reference-${index}.sql`,
 		mediaType: "text/plain",
@@ -108,6 +115,95 @@ test("HTTP chat streams frozen references through Pi and resumes after restart",
 	const created = await fetch(`${app.url}${path}`, { method: "POST", headers, body: JSON.stringify(input) });
 	assert.equal(created.status, 201, await created.clone().text());
 	const conversation = (await created.json()) as Conversation;
+	assert.equal(conversation.modelState.model?.id, "fixture");
+	assert.ok(conversation.sessionFile, "Selection-only sessions have a durable real Pi checkpoint");
+	const selectedResponse = await fetch(`${app.url}${path}/${conversation.id}/model`, {
+		method: "PUT",
+		headers,
+		body: JSON.stringify({ ...defaultSelection, modelId: "fixture-second", persist: false }),
+	});
+	assert.equal(selectedResponse.status, 200, await selectedResponse.clone().text());
+	assert.equal(((await selectedResponse.json()) as SessionModelState).model?.id, "fixture-second");
+	assert.equal(fixture.seen.length, 0, "Model selection never auto-sends dataset context");
+	for (const invalid of [
+		{ ...defaultSelection, modelId: "missing-model" },
+		{ ...defaultSelection, provider: "missing-provider" },
+		{ ...defaultSelection, thinkingLevel: "max" },
+		{ ...defaultSelection, persist: "true" },
+		{ ...defaultSelection, extra: true },
+	])
+		assert.ok(
+			(
+				await fetch(`${app.url}${path}/${conversation.id}/model`, {
+					method: "PUT",
+					headers,
+					body: JSON.stringify(invalid),
+				})
+			).status >= 400,
+		);
+	const selectionOnly = (await (
+		await fetch(`${app.url}${path}/${conversation.id}`, { headers })
+	).json()) as Conversation;
+	assert.equal(selectionOnly.modelState.model?.id, "fixture-second");
+	assert.deepEqual(selectionOnly.scope, conversation.scope);
+	assert.deepEqual(selectionOnly.messages, []);
+	const selectionCheckpoint = await readFile(selectionOnly.sessionFile!, "utf8");
+	await app.close();
+	fixture = await createFauxConversationDriver(dataDir, { beforeResult: () => gate });
+	app = await startWorkbench({ dataDir, port: 0, conversationDriver: fixture.driver, providers: fixture.providers });
+	bootstrap = (await (await fetch(`${app.url}/api/bootstrap`)).json()) as Bootstrap;
+	headers = { "Content-Type": "application/json", "X-Workbench-Token": bootstrap.token };
+	assert.equal(
+		((await (await fetch(`${app.url}/api/chat/model`, { headers })).json()) as SessionModelState).model?.id,
+		"fixture",
+		"Session-only selection does not change the profile default",
+	);
+	const selectedAfterRestart = (await (
+		await fetch(`${app.url}${path}/${conversation.id}`, { headers })
+	).json()) as Conversation;
+	assert.equal(
+		selectedAfterRestart.modelState.model?.id,
+		"fixture-second",
+		"Pi restores a selection-only session before its first prompt",
+	);
+	assert.deepEqual(selectedAfterRestart.scope, conversation.scope);
+	assert.deepEqual(selectedAfterRestart.messages, []);
+	assert.equal(await readFile(selectionOnly.sessionFile!, "utf8"), selectionCheckpoint);
+	assert.equal(
+		conversation.title,
+		input.request.trim().slice(0, 120),
+		"Session title uses the approved user draft before role instructions are added to outgoing messages",
+	);
+	assert.equal(conversation.mode, "execute");
+	assert.equal(conversation.reasoningEffort, "off");
+	for (const body of [
+		{ title: "" },
+		{ title: "Valid", mode: "plan" },
+		{ mode: "unknown" },
+		{ mode: "plan", reasoningEffort: "extreme" },
+		{ archivedAt: "now" },
+	]) {
+		const invalidResponse: Response = await fetch(`${app.url}${path}/${conversation.id}`, {
+			method: "PATCH",
+			headers,
+			body: JSON.stringify(body),
+		});
+		assert.equal(invalidResponse.status, 400);
+	}
+	const renamed = await fetch(`${app.url}${path}/${conversation.id}`, {
+		method: "PATCH",
+		headers,
+		body: JSON.stringify({ title: "Frozen reference analysis" }),
+	});
+	assert.equal(renamed.status, 200);
+	assert.equal(((await renamed.json()) as Conversation).title, "Frozen reference analysis");
+	const planned = await fetch(`${app.url}${path}/${conversation.id}`, {
+		method: "PATCH",
+		headers,
+		body: JSON.stringify({ mode: "plan" }),
+	});
+	assert.equal(planned.status, 200);
+	assert.equal(((await planned.json()) as Conversation).mode, "plan");
 	assert.deepEqual(
 		conversation.scope.context.attachedFiles?.map((file) => file.content),
 		attachments.map((file) => file.content),
@@ -143,6 +239,29 @@ test("HTTP chat streams frozen references through Pi and resumes after restart",
 					await fetch(`${app.url}${path}/${conversation.id}`, { headers })
 				).json()) as Conversation;
 				assert.equal(running.state, "running", "Delta arrives while server run is still active");
+				for (const action of ["duplicate", "archive"]) {
+					const busyActionResponse: Response = await fetch(`${app.url}${path}/${conversation.id}/${action}`, {
+						method: "POST",
+						headers,
+					});
+					assert.equal(busyActionResponse.status, 409);
+				}
+				const busyPatchResponse: Response = await fetch(`${app.url}${path}/${conversation.id}`, {
+					method: "PATCH",
+					headers,
+					body: JSON.stringify({ mode: "execute" }),
+				});
+				assert.equal(busyPatchResponse.status, 409);
+				assert.equal(
+					(
+						await fetch(`${app.url}${path}/${conversation.id}/model`, {
+							method: "PUT",
+							headers,
+							body: JSON.stringify(defaultSelection),
+						})
+					).status,
+					409,
+				);
 				release();
 			}
 			deltas++;
@@ -155,17 +274,72 @@ test("HTTP chat streams frozen references through Pi and resumes after restart",
 	assert.equal(completed.messages.at(-1)?.text, text);
 	assert.ok(completed.sessionFile);
 	assert.deepEqual(completed.scope, conversation.scope);
+	assert.equal(completed.modelState.model?.id, "fixture-second");
+	assert.equal(
+		completed.messages.at(-1)?.model?.id,
+		"fixture-second",
+		"Assistant metadata is Pi's actual dispatched model",
+	);
 	assert.equal(fixture.seen.length, 1);
 	assert.ok(JSON.stringify(fixture.seen[0]).includes("reference-0.sql"));
+	assert.deepEqual(fixture.seen[0].tools ?? [], [], "Plan mode exposes no proposal or execution tools");
+	const sourceSession = await readFile(completed.sessionFile, "utf8");
+	const duplicated = await fetch(`${app.url}${path}/${conversation.id}/duplicate`, { method: "POST", headers });
+	assert.equal(duplicated.status, 201, await duplicated.clone().text());
+	const copy = (await duplicated.json()) as Conversation;
+	assert.notEqual(copy.id, conversation.id);
+	assert.notEqual(copy.sessionFile, completed.sessionFile);
+	assert.deepEqual(copy.scope, completed.scope);
+	assert.deepEqual(copy.messages, completed.messages);
+	assert.ok(copy.sessionFile);
+	const copySession = await readFile(copy.sessionFile, "utf8");
+	assert.deepEqual(copySession.trim().split("\n").slice(1), sourceSession.trim().split("\n").slice(1));
+	const archive = await fetch(`${app.url}${path}/${copy.id}/archive`, { method: "POST", headers });
+	assert.equal(archive.status, 200);
+	const listed = (await (await fetch(`${app.url}${path}`, { headers })).json()) as Conversation[];
+	assert.equal(
+		listed.some(({ id }) => id === copy.id),
+		false,
+	);
+	assert.equal(
+		(await fetch(`${app.url}${path}/${copy.id}`, { headers })).status,
+		200,
+		"Archived audit remains readable",
+	);
+	const persistResponse = await fetch(`${app.url}${path}/${conversation.id}/model`, {
+		method: "PUT",
+		headers,
+		body: JSON.stringify({ ...defaultSelection, modelId: "fixture-second" }),
+	});
+	assert.equal(persistResponse.status, 200);
 	await app.close();
+	// A pre-upgrade record lacks modelState; the Pi JSONL remains the restoration authority.
+	const metadata = new MetadataStore(join(dataDir, "workbench.sqlite"));
+	const persistedConversation = metadata.conversation(project.id, dataset.id, conversation.id)!;
+	delete (persistedConversation as Partial<Conversation>).modelState;
+	metadata.putConversation(persistedConversation);
+	metadata.close();
 
 	fixture = await createFauxConversationDriver(dataDir);
-	app = await startWorkbench({ dataDir, port: 0, conversationDriver: fixture.driver, modelCatalog: fixture.catalog });
+	app = await startWorkbench({ dataDir, port: 0, conversationDriver: fixture.driver, providers: fixture.providers });
 	bootstrap = (await (await fetch(`${app.url}/api/bootstrap`)).json()) as Bootstrap;
 	headers = { "Content-Type": "application/json", "X-Workbench-Token": bootstrap.token };
+	assert.equal(
+		((await (await fetch(`${app.url}/api/chat/model`, { headers })).json()) as SessionModelState).model?.id,
+		"fixture-second",
+		"Explicit default persistence survives restart",
+	);
 	const restored = (await (await fetch(`${app.url}${path}/${conversation.id}`, { headers })).json()) as Conversation;
 	assert.deepEqual(restored.scope, completed.scope);
 	assert.deepEqual(restored.messages, completed.messages);
+	assert.equal(restored.mode, "plan");
+	assert.equal(restored.title, "Frozen reference analysis");
+	assert.equal(
+		restored.modelState.model?.id,
+		"fixture-second",
+		"Legacy DTO hydrates from the real Pi session, not frozen original scope",
+	);
+	assert.equal(restored.scope.modelId, "fixture");
 	let resumed: Conversation | undefined;
 	for await (const frame of frames(
 		await fetch(`${app.url}${path}/${conversation.id}/messages`, {
@@ -182,4 +356,13 @@ test("HTTP chat streams frozen references through Pi and resumes after restart",
 	assert.equal(resumed.messages.length, 4);
 	assert.notEqual(resumed.sessionFile, completed.sessionFile);
 	assert.deepEqual(resumed.scope, completed.scope);
+	assert.equal(
+		await readFile(copy.sessionFile, "utf8"),
+		copySession,
+		"Following up the source cannot mutate its independent duplicate",
+	);
+	assert.equal(await readFile(completed.sessionFile, "utf8"), sourceSession);
+	const archived = (await (await fetch(`${app.url}${path}/${copy.id}`, { headers })).json()) as Conversation;
+	assert.ok(archived.archivedAt);
+	assert.deepEqual(archived.messages, copy.messages);
 });

@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
-import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Context, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { ASSISTANT_OUTPUT_BYTES } from "../../src/assistant-contracts.ts";
-import type { ConversationDriverEvent } from "../../src/conversation-contracts.ts";
+import { ASSISTANT_WORKER_ERRORS } from "../../src/assistant-driver.ts";
+import type { ConversationDriverEvent, ConversationDriverInput } from "../../src/conversation-contracts.ts";
 import { PiConversationDriver } from "../../src/conversation-driver.ts";
-import { runConversationSession } from "../../src/conversation-sdk-worker.ts";
+import { ProviderService } from "../../src/provider-service.ts";
 import {
 	createFauxConversationRuntime,
 	fauxConversationChart,
@@ -20,9 +22,34 @@ globalThis.fetch = async () => {
 	throw new Error("Network is forbidden");
 };
 const root = await mkdtemp(join(tmpdir(), "pi-conversation-sdk-"));
-const credentials = new PiConversationDriver(root);
+const drivers = new Map<ModelRuntime, { driver: PiConversationDriver; providers: ProviderService }>();
+async function registered(runtime: ModelRuntime) {
+	let fixture = drivers.get(runtime);
+	if (!fixture) {
+		const providers = await ProviderService.create(join(root, `profile-${drivers.size}`), { runtime });
+		fixture = { driver: new PiConversationDriver(providers), providers };
+		drivers.set(runtime, fixture);
+	}
+	return fixture;
+}
+async function runConversationSession(
+	input: unknown,
+	onEvent: (event: ConversationDriverEvent) => void,
+	signal: AbortSignal | undefined,
+	runtime: ModelRuntime,
+) {
+	const { driver } = await registered(runtime);
+	try {
+		return await driver.chat(input as ConversationDriverInput, onEvent, signal ?? new AbortController().signal);
+	} catch (cause) {
+		if (cause instanceof Error) {
+			const code = Object.entries(ASSISTANT_WORKER_ERRORS).find(([, message]) => message === cause.message)?.[0];
+			if (code) throw new Error(code);
+		}
+		throw cause;
+	}
+}
 try {
-	await credentials.setCredential("openai", "literal-test-not-a-real-key");
 	const { runtime, faux } = await createFauxConversationRuntime();
 	const frozen = JSON.stringify({
 		dataset: { name: "Frozen dataset", rowsIncluded: false },
@@ -30,7 +57,6 @@ try {
 		executionResults: [{ id: "execution-1", status: "completed", changedCells: 3 }],
 	});
 	const input = {
-		authPath: join(root, "pi", "auth.json"),
 		provider: "openai",
 		modelId: "fixture",
 		sessionDir: join(root, "sessions"),
@@ -38,13 +64,16 @@ try {
 		system: `Read-only frozen context: ${frozen}\nCurrent working directory: ${process.platform === "win32" ? "C:/datapi-assistant" : "/datapi-assistant"}\n`,
 		user: "/skill:not-a-command {{literal user data}}",
 	};
+	const expectedSystemPrompt = `Read-only frozen context: ${frozen}\n\n<cwd>\n${process.platform === "win32" ? "C:/datapi-assistant" : "/datapi-assistant"}\n</cwd>`;
 	let seen: Context | undefined;
 	let maxTokens = 0;
 	const answer = "A streaming response with Unicode 雪. ".repeat(8);
 	faux.setResponses([
-		(context, _options, _state, model) => {
+		(rawContext, streamOptions, _state, model) => {
+			const context = snapshotConversationContext(rawContext);
 			seen = snapshotConversationContext(context);
-			maxTokens = model.maxTokens;
+			maxTokens = streamOptions?.maxTokens ?? 0;
+			assert.equal(model.maxTokens, 20000, "Exact runtime model is not cloned or capped");
 			return fauxAssistantMessage(answer, { timestamp: 0 });
 		},
 	]);
@@ -52,7 +81,6 @@ try {
 	const result = await runConversationSession(
 		input,
 		(event) => {
-			assert.equal(event.type, "text");
 			if (event.type === "text") events.push(event.delta);
 		},
 		undefined,
@@ -68,7 +96,7 @@ try {
 	assert.ok(result.usage.output > 0);
 	assert.equal(maxTokens, 8192);
 	assert.ok(seen);
-	assert.equal(seen.systemPrompt, input.system);
+	assert.equal(seen.systemPrompt, expectedSystemPrompt);
 	assert.deepEqual(seen.tools ?? [], []);
 	assert.equal(seen.messages.length, 1);
 	assert.deepEqual(seen.messages[0].content, [{ type: "text", text: input.user }]);
@@ -80,7 +108,8 @@ try {
 	const resumedRuntime = await createFauxConversationRuntime();
 	let resumed: Context | undefined;
 	resumedRuntime.faux.setResponses([
-		(context) => {
+		(rawContext) => {
+			const context = snapshotConversationContext(rawContext);
 			resumed = snapshotConversationContext(context);
 			return fauxAssistantMessage("Follow-up answer", { timestamp: 1 });
 		},
@@ -94,7 +123,7 @@ try {
 	assert.notEqual(next.sessionFile, result.sessionFile);
 	assert.equal(await readFile(result.sessionFile, "utf8"), persisted);
 	assert.ok(resumed);
-	assert.equal(resumed.systemPrompt, input.system);
+	assert.equal(resumed.systemPrompt, expectedSystemPrompt);
 	assert.deepEqual(resumed.tools ?? [], []);
 	assert.equal(resumed.messages.length, 3);
 	assert.deepEqual(
@@ -105,6 +134,59 @@ try {
 	assert.deepEqual(resumed.messages[1].content, [{ type: "text", text: answer }]);
 	assert.deepEqual(resumed.messages[2].content, [{ type: "text", text: "Continue using the frozen context." }]);
 
+	const configured = await createFauxConversationRuntime({ reasoning: true });
+	let receivedReasoning: unknown;
+	configured.faux.setResponses([
+		(rawContext, options) => {
+			const context = snapshotConversationContext(rawContext);
+			receivedReasoning = options?.reasoning;
+			assert.deepEqual(context.tools ?? [], []);
+			return fauxAssistantMessage("A read-only plan with explicit reasoning.");
+		},
+	]);
+	await runConversationSession(
+		{
+			...input,
+			mode: "plan",
+			reasoningEffort: "high",
+			renameScope: { datasetVersionId: "v1", columns: [{ index: 0, name: "group" }] },
+			chartScope: fauxConversationChartScope(),
+		},
+		() => {},
+		undefined,
+		configured.runtime,
+	);
+	assert.equal(receivedReasoning, "high", "Requested reasoning reaches the actual provider adapter");
+	const screenshot = {
+		type: "image" as const,
+		mimeType: "image/png",
+		data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+	};
+	configured.faux.setResponses([
+		(rawContext) => {
+			const context = snapshotConversationContext(rawContext);
+			const content = context.messages.at(-1)?.content;
+			assert.ok(Array.isArray(content));
+			assert.deepEqual(
+				content.filter((part) => part.type === "image"),
+				[screenshot],
+			);
+			assert.equal(context.systemPrompt?.includes(screenshot.data), false);
+			assert.equal(JSON.stringify(content.filter((part) => part.type === "text")).includes(screenshot.data), false);
+			return fauxAssistantMessage("The explicitly shared screenshot is available.");
+		},
+	]);
+	await runConversationSession({ ...input, images: [screenshot] }, () => {}, undefined, configured.runtime);
+	const textOnly = await createFauxConversationRuntime({ images: false });
+	await assert.rejects(
+		runConversationSession({ ...input, images: [screenshot] }, () => {}, undefined, textOnly.runtime),
+		{ message: "images" },
+	);
+	await assert.rejects(
+		runConversationSession({ ...input, reasoningEffort: "high" }, () => {}, undefined, textOnly.runtime),
+		{ message: "reasoning" },
+	);
+	assert.equal(textOnly.faux.state.callCount, 0);
 	const renameInput = {
 		...input,
 		renameScope: {
@@ -118,7 +200,8 @@ try {
 	const renameEvents: ConversationDriverEvent[] = [];
 	let afterTool: Context | undefined;
 	faux.setResponses([
-		(context) => {
+		(rawContext) => {
+			const context = snapshotConversationContext(rawContext);
 			assert.deepEqual(
 				context.tools?.map((tool) => tool.name),
 				["propose_column_rename"],
@@ -146,7 +229,8 @@ try {
 				{ stopReason: "toolUse" },
 			);
 		},
-		(context) => {
+		(rawContext) => {
+			const context = snapshotConversationContext(rawContext);
 			afterTool = snapshotConversationContext(context);
 			const acknowledgement = context.messages.at(-1);
 			assert.equal(acknowledgement?.role, "toolResult");
@@ -184,7 +268,7 @@ try {
 		renameEvents.filter((event) => event.type === "rename_proposal"),
 		[{ type: "rename_proposal", toolCallId: "rename-proof", datasetVersionId: "v1", column: 0, name: "cohort" }],
 	);
-	assert.deepEqual(Object.keys(renameResult).sort(), ["sessionFile", "text", "usage"]);
+	assert.deepEqual(Object.keys(renameResult).sort(), ["modelState", "sessionFile", "text", "usage"]);
 	const renamedSession = (await readFile(renameResult.sessionFile, "utf8"))
 		.trim()
 		.split("\n")
@@ -201,7 +285,8 @@ try {
 	}
 	const renameResumed = await createFauxConversationRuntime();
 	renameResumed.faux.setResponses([
-		(context) => {
+		(rawContext) => {
+			const context = snapshotConversationContext(rawContext);
 			assert.deepEqual(
 				context.tools?.map((tool) => tool.name),
 				["propose_column_rename"],
@@ -229,7 +314,8 @@ try {
 	const chartEvents: ConversationDriverEvent[] = [];
 	let chartAcknowledgement: Context | undefined;
 	faux.setResponses([
-		(context) => {
+		(rawContext) => {
+			const context = snapshotConversationContext(rawContext);
 			assert.deepEqual(
 				context.tools?.map((tool) => tool.name),
 				["propose_chart"],
@@ -255,7 +341,8 @@ try {
 				{ stopReason: "toolUse" },
 			);
 		},
-		(context) => {
+		(rawContext) => {
+			const context = snapshotConversationContext(rawContext);
 			chartAcknowledgement = snapshotConversationContext(context);
 			const ack = context.messages.at(-1);
 			assert.equal(ack?.role, "toolResult");
@@ -298,7 +385,8 @@ try {
 		);
 	const chartResume = await createFauxConversationRuntime();
 	chartResume.faux.setResponses([
-		(context) => {
+		(rawContext) => {
+			const context = snapshotConversationContext(rawContext);
 			assert.deepEqual(
 				context.tools?.map((tool) => tool.name),
 				["propose_chart"],
@@ -359,7 +447,10 @@ try {
 			runConversationSession(chartInput, (event) => rejected.push(event), undefined, runtime),
 			{ message: "protocol" },
 		);
-		assert.deepEqual(rejected, []);
+		assert.deepEqual(
+			rejected.filter((event) => event.type !== "model"),
+			[],
+		);
 	}
 	faux.setResponses([fauxAssistantMessage(fauxToolCall("propose_chart", chartArgs), { stopReason: "toolUse" })]);
 	await assert.rejects(
@@ -392,7 +483,11 @@ try {
 		runConversationSession(mixedInput, (event) => malformedMixed.push(event), undefined, runtime),
 		{ message: "protocol" },
 	);
-	assert.deepEqual(malformedMixed, [], "No tools execute when another call in the same message is malformed");
+	assert.deepEqual(
+		malformedMixed.filter((event) => event.type !== "model"),
+		[],
+		"No tools execute when another call in the same message is malformed",
+	);
 	faux.setResponses([
 		fauxAssistantMessage(
 			fauxToolCall("propose_chart", { ...chartArgs, evidenceRefs: [], confidence: 0.99 }, { id: "hypothesis" }),
@@ -426,10 +521,16 @@ try {
 		const pending = runConversationSession(mixedInput, (event) => mixedEvents.push(event), undefined, runtime);
 		if (count === 9) {
 			await assert.rejects(pending, { message: "output" });
-			assert.deepEqual(mixedEvents, []);
+			assert.deepEqual(
+				mixedEvents.filter((event) => event.type !== "model"),
+				[],
+			);
 		} else {
 			await pending;
-			assert.equal(mixedEvents.filter((event) => event.type !== "text").length, 8);
+			assert.equal(
+				mixedEvents.filter((event) => event.type === "rename_proposal" || event.type === "chart_proposal").length,
+				8,
+			);
 		}
 	}
 	// Shared identity and count limits also span separate assistant tool messages.
@@ -503,7 +604,8 @@ try {
 					),
 					{ stopReason: "toolUse" },
 				),
-				(context) => {
+				(rawContext) => {
+					const context = snapshotConversationContext(rawContext);
 					assert.equal(context.messages.at(-1)?.role, "toolResult");
 					if (outcome === "cancel") cancel.abort();
 					return outcome === "failure"
@@ -519,7 +621,7 @@ try {
 					user: `Unpublished ${outcome} ${kind}`,
 				},
 				(event) => {
-					if (event.type !== "text") capturedProposals++;
+					if (event.type === "rename_proposal" || event.type === "chart_proposal") capturedProposals++;
 				},
 				cancel.signal,
 				isolatedRuntime.runtime,
@@ -535,7 +637,8 @@ try {
 			const cleanRuntime = await createFauxConversationRuntime();
 			let cleanContext: Context | undefined;
 			cleanRuntime.faux.setResponses([
-				(context) => {
+				(rawContext) => {
+					const context = snapshotConversationContext(rawContext);
 					cleanContext = snapshotConversationContext(context);
 					return fauxAssistantMessage("Only the committed conversation is available.");
 				},
@@ -575,7 +678,10 @@ try {
 			runConversationSession(renameInput, (event) => rejectedEvents.push(event), undefined, runtime),
 			{ message: "protocol" },
 		);
-		assert.deepEqual(rejectedEvents, []);
+		assert.deepEqual(
+			rejectedEvents.filter((event) => event.type !== "model"),
+			[],
+		);
 	}
 	faux.setResponses([
 		fauxAssistantMessage(
@@ -708,25 +814,111 @@ try {
 	faux.setResponses([fauxAssistantMessage("After cancellation")]);
 	assert.equal((await runConversationSession(input, () => {}, undefined, runtime)).text, "After cancellation");
 
-	// Pi auth storage may contain externally written values; never execute their resolver syntax.
-	const marker = join(root, "executed");
-	const hostile = `!node -e "require('node:fs').writeFileSync(${JSON.stringify(marker)},'executed')"`;
-	await writeFile(input.authPath, JSON.stringify({ openai: { type: "api_key", key: hostile } }));
-	const calls = faux.state.callCount;
-	await assert.rejects(
-		runConversationSession(input, () => {}, undefined, runtime),
-		{ message: "credentials" },
+	// Selection operates on a retained real SDK session and setup-only checkpoints restore.
+	const { driver, providers } = await registered(configured.runtime);
+	const scoped = { ...input, conversationId: "selection-proof", reasoningEffort: "high" as const };
+	const originalDefault = providers.settings.getDefaultModel();
+	const selection = await driver.selectModel(scoped, {
+		provider: "openai",
+		modelId: "fixture-second",
+		thinkingLevel: "high",
+		persist: false,
+	});
+	assert.equal(selection.modelState.model?.id, "fixture-second");
+	assert.equal(selection.modelState.thinkingLevel, "high");
+	assert.equal(providers.settings.getDefaultModel(), originalDefault, "Session selection must not change default");
+	assert.ok(selection.sessionFile);
+	await access(selection.sessionFile);
+	const selectedBytes = await readFile(selection.sessionFile, "utf8");
+	const restart = new PiConversationDriver(providers);
+	try {
+		const restored = await restart.modelState({ ...scoped, sessionFile: selection.sessionFile });
+		assert.equal(restored.modelState.model?.id, "fixture-second");
+		assert.equal(restored.modelState.thinkingLevel, "high");
+	} finally {
+		await restart.close();
+	}
+	assert.equal(await readFile(selection.sessionFile, "utf8"), selectedBytes);
+	const beforePicker = configured.faux.state.callCount;
+	await driver.selectDraftModel({
+		provider: "openai",
+		modelId: "fixture-second",
+		thinkingLevel: "high",
+		persist: true,
+	});
+	assert.equal((await driver.draftModelState()).model?.id, "fixture-second");
+	assert.equal(providers.settings.getDefaultModel(), "fixture-second");
+	assert.equal(providers.settings.getDefaultThinkingLevel(), "high");
+	assert.equal(configured.faux.state.callCount, beforePicker, "Model selection never invokes a provider");
+	const freshDraft = new PiConversationDriver(providers);
+	try {
+		assert.equal((await freshDraft.draftModelState()).model?.id, "fixture-second");
+	} finally {
+		await freshDraft.close();
+	}
+	configured.faux.setResponses([fauxAssistantMessage("Selected physical response")]);
+	const physical = await driver.chat(
+		{ ...scoped, sessionFile: selection.sessionFile },
+		() => {},
+		new AbortController().signal,
 	);
-	await assert.rejects(access(marker), { code: "ENOENT" });
-	assert.equal(faux.state.callCount, calls);
-	await writeFile(input.authPath, "{}");
-	await assert.rejects(
-		runConversationSession(input, () => {}, undefined, runtime),
-		{ message: "credentials" },
+	assert.equal(physical.modelState.model?.id, "fixture-second");
+	assert.equal(physical.modelState.routedModel?.id, "fixture-second");
+	const automatic = await driver.selectModel(
+		{ ...scoped, sessionFile: physical.sessionFile },
+		{ provider: "router", modelId: "auto", thinkingLevel: "high", persist: false },
 	);
+	const modelEvents: ConversationDriverEvent[] = [];
+	configured.faux.setResponses([fauxAssistantMessage("Auto routed response")]);
+	const routed = await driver.chat(
+		{ ...scoped, sessionFile: automatic.sessionFile },
+		(event) => modelEvents.push(event),
+		new AbortController().signal,
+	);
+	assert.equal(routed.modelState.model?.provider, "router");
+	assert.equal(routed.modelState.model?.id, "auto");
+	assert.equal(routed.modelState.routedModel?.provider, "openai");
+	assert.ok(["fixture", "fixture-second"].includes(routed.modelState.routedModel?.id ?? ""));
+	assert.deepEqual(modelEvents.filter((event) => event.type === "model").at(-1), {
+		type: "model",
+		modelState: routed.modelState,
+	});
+	const oldSelectionBytes = await readFile(selection.sessionFile, "utf8");
+	const unavailableCalls = configured.faux.state.callCount;
+	const selectedModel = configured.runtime.getModel("openai", "fixture-second");
+	assert.ok(selectedModel);
+	configured.runtime.unregisterProvider("openai");
+	const unavailable = new PiConversationDriver(providers);
+	try {
+		await assert.rejects(
+			unavailable.chat({ ...scoped, sessionFile: selection.sessionFile }, () => {}, new AbortController().signal),
+			{ message: ASSISTANT_WORKER_ERRORS.model },
+		);
+		assert.equal(
+			configured.faux.state.callCount,
+			unavailableCalls,
+			"A removed saved model cannot silently route to an available provider",
+		);
+		const explicit = await unavailable.selectModel(
+			{ ...scoped, sessionFile: selection.sessionFile },
+			{ provider: "router", modelId: "auto", thinkingLevel: "high", persist: false },
+		);
+		assert.equal(explicit.modelState.model?.id, "auto", "An explicit replacement recovers a removed saved model");
+	} finally {
+		await unavailable.close();
+	}
+	assert.equal(await readFile(selection.sessionFile, "utf8"), oldSelectionBytes);
+	// No raw provider errors or diagnostic bodies survive even in abandoned JSONL.
+	for (const file of await readdir(input.sessionDir)) {
+		if (file.endsWith(".jsonl"))
+			assert.equal((await readFile(join(input.sessionDir, file), "utf8")).includes("secret-provider-error"), false);
+	}
 	assert.equal(networkCalls, 0);
 	process.stdout.write("CONVERSATION_SDK_PROOF_OK\n");
 } finally {
-	await credentials.close();
+	for (const { driver, providers } of drivers.values()) {
+		await driver.close();
+		await providers.close();
+	}
 	await rm(root, { recursive: true, force: true });
 }

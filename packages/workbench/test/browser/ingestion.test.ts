@@ -155,6 +155,81 @@ async function setup(
 	return { browser, document, element, change, choose, requests };
 }
 
+test("bundled provider authentication sends JSON through the shared browser transport", async (t) => {
+	const authPath = "/api/providers/test-provider/auth";
+	const operationPath = "/api/provider-auth/transport-operation";
+	const operation = {
+		id: "transport-operation",
+		providerId: "test-provider",
+		authType: "api_key",
+		state: "connecting",
+		done: false,
+		message: "Enter your key",
+		prompts: [{ id: "key", type: "secret", message: "API key" }],
+		events: [],
+	};
+	const { element, document, browser, requests } = await setup(t, {
+		respond(path, init) {
+			if (path === "/api/providers")
+				return Response.json({
+					providers: [
+						{
+							id: "test-provider",
+							name: "Test Provider",
+							auth: { oauth: null, apiKey: { label: "Enter API key", interactive: true } },
+							state: "disconnected",
+							configured: false,
+							authType: null,
+							storedAuthType: null,
+							source: null,
+							modelCount: 0,
+							message: "Not connected",
+						},
+					],
+					models: [],
+					guidance: "",
+				});
+			if (path === authPath || path === operationPath) {
+				const headers = new Headers(init.headers);
+				if (init.method === "POST" && headers.get("Content-Type") !== "application/json")
+					return Response.json({ error: "Send a JSON request." }, { status: 415 });
+				return Response.json(
+					path === operationPath && init.method === "POST"
+						? { ...operation, done: true, state: "failed", message: "Test complete", prompts: [] }
+						: operation,
+				);
+			}
+		},
+	});
+	element("settings-provider").click();
+	await waitFor(() => document.querySelector('[aria-label="Connect Test Provider"]') !== null);
+	(document.querySelector('[aria-label="Connect Test Provider"]') as HTMLButtonElement).click();
+	const start = [...element("providers-root").querySelectorAll("button")].find(
+		(button) => button.textContent === "Enter API key",
+	);
+	assert.ok(start);
+	start.click();
+	await waitFor(() => document.getElementById("provider-prompt-key") !== null);
+	const input = element<HTMLInputElement>("provider-prompt-key");
+	input.value = "test-only-key";
+	input.form!.dispatchEvent(new browser.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event);
+	await waitFor(() => requests.some(({ path, init }) => path === operationPath && init.method === "POST"));
+	const posted = requests.filter(
+		({ path, init }) => [authPath, operationPath].includes(path) && init.method === "POST",
+	);
+	assert.equal(posted.length, 2);
+	for (const { init } of posted) {
+		const headers = new Headers(init.headers);
+		assert.equal(headers.get("Content-Type"), "application/json");
+		assert.equal(headers.get("X-Workbench-Token"), "test-token");
+		assert.equal(init.credentials, "same-origin");
+		assert.equal(init.redirect, "error");
+	}
+	assert.deepEqual(JSON.parse(String(posted[0].init.body)), { type: "api_key" });
+	assert.deepEqual(JSON.parse(String(posted[1].init.body)), { promptId: "key", value: "test-only-key" });
+	assert.equal(input.value, "");
+});
+
 test("preview choices honor small bootstrap caps and exact project preferences after form reset", async (t) => {
 	let created: { name: string; description: string; settings: { previewRowLimit: number } } | undefined;
 	const { element, browser, requests } = await setup(t, {

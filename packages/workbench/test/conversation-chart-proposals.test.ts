@@ -17,6 +17,7 @@ import type {
 import { ConversationService } from "../src/conversation-service.ts";
 import { MetadataStore } from "../src/metadata.ts";
 import { WorkbenchError, WorkbenchStore } from "../src/storage.ts";
+import { createFauxConversationDriver } from "./fixtures/conversation-faux-driver.ts";
 
 function status(code: number): (error: unknown) => boolean {
 	return (error) => error instanceof WorkbenchError && error.status === code;
@@ -98,12 +99,13 @@ async function fixture(context: TestContext) {
 		archivedAt: null,
 		state: "ready",
 		sessionFile: null,
+		modelState: { model: null, thinkingLevel: "off", routedModel: null },
 		scope: {
 			version: 1,
 			projectId: project.id,
 			datasetId: dataset.id,
 			datasetVersionId: dataset.currentVersionId,
-			provider: "fixture",
+			provider: "openai",
 			modelId: "fixture",
 			context: disclosure,
 			contextHash: createHash("sha256").update(JSON.stringify(disclosure)).digest("hex"),
@@ -188,6 +190,20 @@ test(
 		assert.deepEqual(await state.store.listCharts(projectId, dataset.id), []);
 		const first = await state.store.previewChartProposal(projectId, dataset.id, conversation.id, linked.id);
 		assert.equal(first.chart.marks.length, 2);
+		const planning = await state.store.conversation(projectId, dataset.id, conversation.id);
+		planning.mode = "plan";
+		await state.store.putConversation(planning);
+		await assert.rejects(
+			state.store.saveChartProposal(projectId, dataset.id, conversation.id, linked.id, approval(first.proposal)),
+			/Plan mode cannot save charts/,
+		);
+		assert.deepEqual(await state.store.listCharts(projectId, dataset.id), []);
+		assert.equal(
+			(await state.store.chartProposal(projectId, dataset.id, conversation.id, linked.id)).state,
+			"previewed",
+		);
+		planning.mode = "execute";
+		await state.store.putConversation(planning);
 		assert.deepEqual(first.chart.spec, linked.spec);
 		assert.deepEqual(Object.keys(first.proposal.preview!).sort(), [
 			"datasetVersionHash",
@@ -591,7 +607,13 @@ test(
 	async (context) => {
 		const { state, projectId, dataset, conversation, input } = await fixture(context);
 		let turn = 0;
+		const pi = await createFauxConversationDriver(state.root);
+		context.after(async () => {
+			await pi.driver.close();
+			await pi.providers.close();
+		});
 		const service = new ConversationService(state.store, {
+			...pi.driver,
 			async chat(scope, onEvent) {
 				assert.deepEqual(scope.chartScope, conversation.scope.context);
 				assert.equal(JSON.stringify(scope).includes("first-secret"), false);
@@ -611,14 +633,12 @@ test(
 					...(turn === 1 ? { affectedColumns: [2] } : { approved: true }),
 				});
 				return {
+					modelState: conversation.modelState,
 					sessionFile: "uncommitted.jsonl",
 					text: "uncommitted answer",
 					usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 },
 				};
 			},
-			async setCredential() {},
-			async deleteCredential() {},
-			async close() {},
 		});
 		context.after(() => service.close());
 		for (; turn < 3; turn++) {
@@ -638,23 +658,27 @@ test(
 	{ timeout: 180_000 },
 	async (context) => {
 		const { state, projectId, dataset, conversation, input } = await fixture(context);
+		const pi = await createFauxConversationDriver(state.root);
+		context.after(async () => {
+			await pi.driver.close();
+			await pi.providers.close();
+		});
 		const service = new ConversationService(state.store, {
-			async chat(scope, onEvent) {
+			...pi.driver,
+			async chat(scope, onEvent, signal) {
 				assert.deepEqual(scope.chartScope, conversation.scope.context);
+				const actual = await pi.driver.chat(scope, () => {}, signal);
 				const event = { type: "chart_proposal" as const, ...structuredClone(input) };
 				onEvent(event);
 				event.spec.x = 2;
 				event.affectedColumns.push(2);
 				scope.chartScope!.schema[0].name = "mutated driver copy";
 				return {
-					sessionFile: "completed.jsonl",
+					...actual,
 					text: "Review the proposed chart locally.",
 					usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 },
 				};
 			},
-			async setCredential() {},
-			async deleteCredential() {},
-			async close() {},
 		});
 		context.after(() => service.close());
 		const result = await service.send(projectId, dataset.id, conversation.id, { message: "Chart these values" });
