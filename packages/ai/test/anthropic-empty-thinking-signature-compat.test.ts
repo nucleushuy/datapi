@@ -18,8 +18,8 @@ class PayloadCaptured extends Error {
 
 function makeModel(allowEmptySignature?: boolean): Model<"anthropic-messages"> {
 	return {
-		id: "mimo-v2.5-pro",
-		name: "MiMo-V2.5-Pro",
+		id: "mimo-v2.6-pro",
+		name: "MiMo-V2.6-Pro",
 		api: "anthropic-messages",
 		provider: "xiaomi-token-plan-ams",
 		baseUrl: "http://127.0.0.1:9/anthropic",
@@ -36,7 +36,7 @@ function makeContext(
 	thinkingSignature: string,
 	thinking = "internal reasoning",
 	provider = "xiaomi-token-plan-ams",
-	model = "mimo-v2.5-pro",
+	model = "mimo-v2.6-pro",
 ): Context {
 	const assistant: AssistantMessage = {
 		role: "assistant",
@@ -106,7 +106,7 @@ describe("Anthropic empty thinking signature compat", () => {
 
 	// Regression for #9323: Fireworks emits unsigned thinking that must survive replay.
 	it.each([
-		"accounts/fireworks/models/deepseek-v4-flash-0731",
+		"accounts/fireworks/models/deepseek-v4p1-flash",
 		"accounts/fireworks/models/deepseek-v4-flash-vision-exp",
 		"accounts/fireworks/models/deepseek-v4-pro-0813",
 		"accounts/fireworks/models/qwen3p8-max",
@@ -114,6 +114,7 @@ describe("Anthropic empty thinking signature compat", () => {
 		"accounts/fireworks/models/kimi-k2p6",
 	] as const)("preserves unsigned thinking for Fireworks %s", async (modelId) => {
 		const model = getModel("fireworks", modelId);
+		if (model.api !== "anthropic-messages") throw new Error(`Expected anthropic-messages API for ${model.id}`);
 		expect(model.compat?.allowEmptySignature).toBe(true);
 		const context = makeContext("", "internal reasoning", "fireworks", modelId);
 		const assistant = context.messages[1] as AssistantMessage;
@@ -127,7 +128,8 @@ describe("Anthropic empty thinking signature compat", () => {
 
 	// Regression for #9323: opting into unsigned replay must not change cross-model conversion.
 	it("still converts cross-model Fireworks thinking to text", async () => {
-		const model = getModel("fireworks", "accounts/fireworks/models/deepseek-v4-flash-0731");
+		const model = getModel("fireworks", "accounts/fireworks/models/deepseek-v4p1-flash");
+		if (model.api !== "anthropic-messages") throw new Error(`Expected anthropic-messages API for ${model.id}`);
 		const payload = await capturePayload(
 			model,
 			makeContext("", "internal reasoning", "fireworks", "accounts/fireworks/models/kimi-k2p6"),
@@ -139,6 +141,7 @@ describe("Anthropic empty thinking signature compat", () => {
 
 	it.each(["k3"] as const)("allows empty signatures for Kimi Coding %s", async (modelId) => {
 		const model = getModel("kimi-coding", modelId);
+		if (model.api !== "anthropic-messages") throw new Error(`Expected anthropic-messages API for ${model.id}`);
 		expect(model.compat?.allowEmptySignature).toBe(true);
 
 		const payload = await capturePayload(model, makeContext(" ", "internal reasoning", "kimi-coding", modelId));
